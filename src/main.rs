@@ -24,7 +24,7 @@ pub mod executors;
 pub mod strategies;
 
 static POLL_INTERVAL_SECS: u64 = 60 * 5;
-pub const CHAIN_ID: u64 = 8453;
+pub const CHAIN_ID: u64 = 1337;
 
 /// CLI Options.
 #[derive(Parser, Debug)]

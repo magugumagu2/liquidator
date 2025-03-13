@@ -46,10 +46,11 @@ struct DeploymentConfig {
 pub enum Deployment {
     AAVE,
     SEASHELL,
+    HYFI,
 }
 
-pub const WETH_ADDRESS: &str = "0x4200000000000000000000000000000000000006";
-pub const MULTICALL3_ADDRESS: &str = "0xcA11bde05977b3631167028862bE2a173976CA11";
+pub const WETH_ADDRESS: &str = "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0";
+pub const MULTICALL3_ADDRESS: &str = "0x720472c8ce72c2A2D711333e064ABD3E6BbEAdd3";
 
 pub const LIQUIDATION_CLOSE_FACTOR_THRESHOLD: &str = "950000000000000000";
 pub const MAX_LIQUIDATION_CLOSE_FACTOR: u64 = 10000;
@@ -80,6 +81,13 @@ fn get_deployment_config(deployment: Deployment) -> DeploymentConfig {
                 .unwrap(),
             l2_encoder: Address::from_str("0xceceF475167f7BFD8995c0cbB577644b623cD7Cf").unwrap(),
             creation_block: 3318602,
+        },
+        Deployment::HYFI => DeploymentConfig {
+            pool_address: Address::from_str("0x32467b43BFa67273FC7dDda0999Ee9A12F2AaA08").unwrap(),
+            pool_data_provider: Address::from_str("0x0B306BF915C4d645ff596e518fAf3F9669b97016").unwrap(),
+            oracle_address: Address::from_str("0x0E801D84Fa97b50751Dbf25036d067dCf18858bF").unwrap(),
+            l2_encoder: Address::from_str("0x49fd2BE640DB2910c2fAb69bB8531Ab6E76127ff").unwrap(),
+            creation_block: 0,
         },
     }
 }
@@ -151,6 +159,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
 struct LiquidationOpportunity {
     borrower: Address,
     collateral: Address,
+    collateral_to_liquidate: U256,
     debt: Address,
     debt_to_cover: U256,
     profit_eth: I256,
@@ -172,7 +181,7 @@ impl<M: Middleware + 'static> Strategy<Event, Action> for AaveStrategy<M> {
     }
 
     // Process incoming events, seeing if we can arb new orders, and updating the internal state on new blocks.
-    async fn process_event(&mut self, event: Event) -> Option<Action> {
+    async fn process_event(&mut self, event: Event) -> Vec<Action> {
         match event {
             // Event::NewBlock(block) => self.process_new_block_event(block).await,
             Event::NewTick(block) => self.process_new_tick_event(block).await,
@@ -189,40 +198,70 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
     // }
 
     /// Process new block events, updating the internal state.
-    async fn process_new_tick_event(&mut self, event: NewTick) -> Option<Action> {
+    async fn process_new_tick_event(&mut self, event: NewTick) -> Vec<Action> {
         info!("received new tick: {:?}", event);
-        self.update_state()
-            .await
-            .map_err(|e| error!("Update State error: {}", e))
-            .ok()?;
+        if let Err(e) = self.update_state().await {
+            error!("Update State error: {}", e);
+            return vec![];
+        }
 
         info!("Total borrower count: {}", self.borrowers.len());
-        let op = self
-            .get_best_liquidation_op()
-            .await
-            .map_err(|e| error!("Error finding liq ops: {}", e))
-            .ok()??;
+        let op = match self.get_best_liquidation_op().await {
+            Ok(Some(op)) => op,
+            Ok(None) => {
+                info!("No liquidation opportunities found");
+                return vec![];
+            }
+            Err(e) => {
+                error!("Error finding liq ops: {}", e);
+                return vec![];
+            }
+        };
 
         info!("Best op - profit: {}", op.profit_eth);
 
         if op.profit_eth < I256::from(0) {
             info!("No profitable ops, passing");
-            return None;
+            return vec![];
         }
 
-        return Some(Action::SubmitTx(SubmitTxToMempool {
-            tx: self
-                .build_liquidation(&op)
-                .await
-                .map_err(|e| error!("Error building liquidation: {}", e))
-                .ok()?,
+        // Check if user has sufficient debt token balance
+        let has_balance = match self.check_user_balance(op.debt, op.debt_to_cover).await {
+            Ok(balance) => balance,
+            Err(e) => {
+                error!("Error checking balance: {}", e);
+                return vec![];
+            }
+        };
+
+        if !has_balance {
+            info!("Insufficient balance for debt token {}", op.debt);
+            return vec![];
+        }
+
+        let tx = match self.build_liquidation(&op).await {
+            Ok(tx) => tx,
+            Err(e) => {
+                error!("Error building liquidation: {}", e);
+                return vec![];
+            }
+        };
+
+        let total_profit = match U256::from_dec_str(&op.profit_eth.to_string()) {
+            Ok(profit) => profit,
+            Err(e) => {
+                error!("Failed to convert profit: {}", e);
+                return vec![];
+            }
+        };
+
+        vec![Action::SubmitTx(SubmitTxToMempool {
+            tx,
             gas_bid_info: Some(GasBidInfo {
                 bid_percentage: self.bid_percentage,
-                total_profit: U256::from_dec_str(&op.profit_eth.to_string())
-                    .map_err(|e| error!("Failed to bid: {}", e))
-                    .ok()?,
+                total_profit,
             }),
-        }));
+        })]
     }
 
     // for all known borrowers, return a sorted set of those with health factor < 1
@@ -258,6 +297,8 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
                         borrower, health_factor
                     );
                     underwater_borrowers.push((borrower.address, health_factor));
+                } else {
+                    info!("Borrower {:?} is not underwater; healthFactor: {}", borrower.address, health_factor);
                 }
             }
         }
@@ -285,6 +326,19 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
         Ok(())
     }
 
+    fn write_intermediate_cache(&self, block_number: u64, borrower_count: u64) {
+        info!("Writing intermediate cache after {} new borrowers", borrower_count);
+        let cache = StateCache {
+            last_block_number: block_number,
+            borrowers: self.borrowers.clone(),
+        };
+        if let Err(e) = File::create(STATE_CACHE_FILE)
+            .and_then(|mut file| file.write_all(serde_json::to_string(&cache)?.as_bytes()))
+        {
+            error!("Failed to write intermediate cache: {}", e);
+        }
+    }
+
     // update known borrower state from last block to latest block
     async fn update_state(&mut self) -> Result<()> {
         let latest_block = self.client.get_block_number().await?;
@@ -293,69 +347,77 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
             self.last_block_number, latest_block
         );
 
-        self.get_borrow_logs(self.last_block_number.into(), latest_block)
-            .await?
-            .into_iter()
-            .for_each(|log| {
-                let user = log.on_behalf_of;
-                // fetch assets if user already a borrower
-                if self.borrowers.contains_key(&user) {
-                    let borrower = self.borrowers.get_mut(&user).unwrap();
-                    borrower.debt.insert(log.reserve);
-                    return;
-                } else {
-                    self.borrowers.insert(
-                        user,
-                        Borrower {
-                            address: user,
-                            collateral: HashSet::new(),
-                            debt: HashSet::from([log.reserve]),
-                        },
-                    );
-                }
-            });
+        let mut borrower_count = 0;
+        const BLOCK_CHUNK_SIZE: u64 = 1_000_000;
+
+        // Process blocks in 1M chunks
+        for chunk_start in (self.last_block_number..latest_block.as_u64()).step_by(BLOCK_CHUNK_SIZE as usize) {
+            let chunk_end = std::cmp::min(chunk_start + BLOCK_CHUNK_SIZE, latest_block.as_u64());
+            info!(
+                "Processing borrow logs for blocks {} to {}",
+                chunk_start, chunk_end
+            );
+
+            self.get_borrow_logs(chunk_start.into(), chunk_end.into())
+                .await?
+                .into_iter()
+                .for_each(|log| {
+                    let user = log.on_behalf_of;
+                    if self.borrowers.contains_key(&user) {
+                        let borrower = self.borrowers.get_mut(&user).unwrap();
+                        borrower.debt.insert(log.reserve);
+
+                        self.write_intermediate_cache(chunk_end, borrower_count);
+                    } else {
+                        self.borrowers.insert(
+                            user,
+                            Borrower {
+                                address: user,
+                                collateral: HashSet::new(),
+                                debt: HashSet::from([log.reserve]),
+                            },
+                        );
+                        borrower_count += 1;
+
+                        self.write_intermediate_cache(chunk_end, borrower_count);
+                    }
+                });
+        }
 
         info!(
             "Got borrow logs from {} to {}",
             self.last_block_number, latest_block
         );
 
-        self.get_supply_logs(self.last_block_number.into(), latest_block)
-            .await?
-            .into_iter()
+        info!("Getting supply logs");
+
+        for chunk_start in (self.config.creation_block..latest_block.as_u64()).step_by(BLOCK_CHUNK_SIZE as usize) {
+            let chunk_end = std::cmp::min(chunk_start + BLOCK_CHUNK_SIZE, latest_block.as_u64());
+            info!("Getting supply logs from {} to {}", chunk_start, chunk_end);
+            self.get_supply_logs(chunk_start.into(), chunk_end.into())
+                .await?
+                .into_iter()
             .for_each(|log| {
                 let user = log.on_behalf_of;
-                // fetch assets if user already a supplier
                 if self.borrowers.contains_key(&user) {
+                    info!("Found borrower with collateral {:?}", log.reserve);
+                    self.write_intermediate_cache(chunk_end, borrower_count);
                     let borrower = self.borrowers.get_mut(&user).unwrap();
-                    borrower.collateral.insert(log.reserve);
-                    return;
-                } else {
-                    self.borrowers.insert(
-                        user,
-                        Borrower {
-                            address: user,
-                            collateral: HashSet::from([log.reserve]),
-                            debt: HashSet::new(),
-                        },
-                    );
-                }
-            });
+                        borrower.collateral.insert(log.reserve);
+                    }
+                });
+        }
 
-        info!(
-            "Got supply logs from {} to {}",
-            self.last_block_number, latest_block
-        );
+        info!("Got supply logs");
 
-        // write state cache to file
-        info!("Write state cache to file {}", STATE_CACHE_FILE);
+        self.last_block_number = latest_block.as_u64();
+
+        info!("Writing cache");
         let cache = StateCache {
-            last_block_number: latest_block.as_u64(),
+            last_block_number: self.last_block_number,
             borrowers: self.borrowers.clone(),
         };
-        self.last_block_number = latest_block.as_u64();
-        let mut file = File::create(STATE_CACHE_FILE)?;
-        file.write_all(serde_json::to_string(&cache)?.as_bytes())?;
+        File::create(STATE_CACHE_FILE)?.write_all(serde_json::to_string(&cache)?.as_bytes())?;
 
         Ok(())
     }
@@ -365,9 +427,13 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
         let pool = Pool::<M>::new(self.config.pool_address, self.client.clone());
 
         let mut res = Vec::new();
-        for start_block in
-            (from_block.as_u64()..to_block.as_u64()).step_by(LOG_BLOCK_RANGE as usize)
+        for (i, start_block) in (from_block.as_u64()..to_block.as_u64())
+            .step_by(LOG_BLOCK_RANGE as usize)
+            .enumerate()
         {
+            if i % 100 == 0 {
+                info!("Getting borrow logs from block {} to {}", start_block, start_block + LOG_BLOCK_RANGE - 1);
+            }
             let end_block = std::cmp::min(start_block + LOG_BLOCK_RANGE - 1, to_block.as_u64());
             pool.borrow_filter()
                 .from_block(start_block)
@@ -512,6 +578,8 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
         let mut best_op: Option<LiquidationOpportunity> = None;
         let pool_state = self.get_pool_state().await?;
 
+        info!("pool_state check");
+
         for (borrower, health_factor) in underwater {
             let borrower_details = self
                 .borrowers
@@ -522,6 +590,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
                 for debt_address in &borrower_details.debt {
                     // TODO: handle case where collateral and debt are same asset
                     if collateral_address.ne(debt_address) {
+                        info!("borrower: {:?}, collateral: {:?}, debt: {:?}", borrower, collateral_address, debt_address);
                         if let Some(op) = self
                             .get_liquidation_opportunity(
                                 &borrower,
@@ -608,6 +677,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
         health_factor: &U256,
         pool_state: &PoolState,
     ) -> Result<LiquidationOpportunity> {
+        info!("getting liquidation opportunity for {:?}", borrower_address);
         let collateral_asset_price = pool_state
             .prices
             .get(collateral_address)
@@ -640,8 +710,8 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
 
         let mut debt_to_cover =
             (stable_debt + variable_debt) * close_factor / MAX_LIQUIDATION_CLOSE_FACTOR;
-        let base_collateral = (debt_asset_price * debt_to_cover * collateral_unit)
-            / (collateral_asset_price * debt_unit);
+        let base_collateral = (debt_asset_price * debt_to_cover * debt_unit)
+            / (collateral_asset_price * collateral_unit);
         let mut collateral_to_liquidate = percent_mul(base_collateral, liquidation_bonus);
         let user_collateral_balance = a_token.balance_of(*borrower_address).await?;
 
@@ -654,6 +724,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
         let mut op = LiquidationOpportunity {
             borrower: borrower_address.clone(),
             collateral: collateral_address.clone(),
+            collateral_to_liquidate,
             debt: debt_address.clone(),
             debt_to_cover,
             profit_eth: I256::from(0),
@@ -690,13 +761,21 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
             .call()
             .await?;
 
+        info!("l2 encoder data0: {:?}", data0);
+        info!("l2 encoder data1: {:?}", data1);
+
         let swap_path = self.get_swap_path(&op.collateral, &op.debt)?;
+
+        info!("swap path: {:?}", swap_path);
 
         let contract_call = liquidator.liquidate(
             op.collateral,
+            op.debt,
+            op.borrower,
             op.debt_to_cover,
-            data0,
-            data1,
+            op.collateral_to_liquidate,
+            self.liquidator,
+            true,
             Bytes::from(swap_path),
         );
 
@@ -708,6 +787,19 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
     async fn build_liquidation(&self, op: &LiquidationOpportunity) -> Result<TypedTransaction> {
         let mut call = self.build_liquidation_call(op).await?;
         Ok(call.tx.set_chain_id(self.chain_id).clone())
+    }
+
+    async fn check_user_balance(&self, token: Address, amount: U256) -> Result<bool> {
+        let token_contract = IERC20::new(token, self.client.clone());
+        let user = self.client.default_sender()
+            .ok_or(anyhow!("No default sender configured"))?;
+        
+        let balance = token_contract.balance_of(user).await?;
+        info!(
+            "User balance check - token: {}, required: {}, balance: {}",
+            token, amount, balance
+        );
+        Ok(balance >= amount)
     }
 }
 

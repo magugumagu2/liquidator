@@ -3,7 +3,7 @@ pragma solidity ^0.8.13;
 
 import {Owned} from "solmate/auth/Owned.sol";
 import {ERC20} from "solmate/tokens/ERC20.sol";
-import {IL2Pool} from "./interfaces/IL2Pool.sol";
+import {IPool} from "./interfaces/IPool.sol";
 import {IUniswapV3SwapCallback} from "./interfaces/IUniswapV3SwapCallback.sol";
 import {IUniswapV3PoolActions} from "./interfaces/IUniswapV3PoolActions.sol";
 import {PoolAddress} from "./lib/PoolAddress.sol";
@@ -16,33 +16,44 @@ uint160 constant MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970
 contract Liquidator is Owned(msg.sender), IUniswapV3SwapCallback {
     struct SwapCallbackData {
         bytes path;
-        bytes32 liquidationArg1;
-        bytes32 liquidationArg2;
+        address collateralAsset;
+        address debtAsset;
+        address user;
+        uint256 debtToCover;
+        uint256 liquidatedCollateralAmount;
+        address liquidator;
+        bool receiveAToken;
     }
 
-    address private constant uniswapV3Factory = 0x33128a8fC17869897dcE68Ed026d694621f6FDfD;
-    IL2Pool public constant pool = IL2Pool(0x8F44Fd754285aa6A2b8B9B97739B79746e0475a7);
+    address private constant uniswapV3Factory = 0xccf1769D8713099172642EB55DDFFC0c5A444FE9;
+    IPool public constant pool = IPool(0x32467b43BFa67273FC7dDda0999Ee9A12F2AaA08);
 
     constructor() {}
 
     /// @notice Performs a liquidation using a Uniswap v3 flash swap
     /// @param collateral address of the collateral asset to be liquidated
+    /// @param debtAsset address of the debt asset to be repaid
+    /// @param user address of the user to be liquidated
     /// @param debtToCover amount of debt asset to repay in exchange for collateral
-    /// @param liquidationArg1 encoded argument for Aave L2 Pool liquidation call, see: IL2Pool and IL2Encoder
-    /// @param liquidationArg2 encoded argument for Aave L2 Pool liquidation call, see: IL2Pool and IL2Encoder
+    /// @param liquidatedCollateralAmount amount of collateral to liquidate
+    /// @param liquidator address that will receive the liquidated collateral
+    /// @param receiveAToken true if the liquidator wants to receive aTokens, false for underlying asset
     /// @param swapPath encoded path of pools to swap collateral through, see: https://docs.uniswap.org/contracts/v3/guides/swaps/multihop-swaps
     function liquidate(
         address collateral,
+        address debtAsset,
+        address user,
         uint256 debtToCover,
-        bytes32 liquidationArg1,
-        bytes32 liquidationArg2,
+        uint256 liquidatedCollateralAmount,
+        address liquidator,
+        bool receiveAToken,
         bytes calldata swapPath
     ) external onlyOwner returns (int256 collateralGain) {
         uint256 collateralBalance = ERC20(collateral).balanceOf(address(this));
 
         swapOutUniswap(
             debtToCover,
-            SwapCallbackData({path: swapPath, liquidationArg1: liquidationArg1, liquidationArg2: liquidationArg2})
+            SwapCallbackData({path: swapPath, collateralAsset: collateral, debtAsset: debtAsset, user: user, debtToCover: debtToCover, liquidatedCollateralAmount: liquidatedCollateralAmount, liquidator: liquidator, receiveAToken: receiveAToken})
         );
 
         collateralGain = int256(ERC20(collateral).balanceOf(address(this))) - int256(collateralBalance);
@@ -55,12 +66,13 @@ contract Liquidator is Owned(msg.sender), IUniswapV3SwapCallback {
         (address tokenIn, address tokenOut, uint24 fee) = Path.decodeFirstPool(data.path);
         verifyCallback(uniswapV3Factory, PoolAddress.getPoolKey(tokenIn, tokenOut, fee));
 
-        if (data.liquidationArg1 != "" && data.liquidationArg2 != "") {
-            pool.liquidationCall(data.liquidationArg1, data.liquidationArg2);
-
-            delete data.liquidationArg1;
-            delete data.liquidationArg2;
-        }
+        pool.liquidationCall(
+            data.collateralAsset,
+            data.debtAsset,
+            data.user,
+            data.debtToCover,
+            data.receiveAToken
+        );
 
         uint256 amountToPay = amount0Delta > 0 ? uint256(amount0Delta) : uint256(amount1Delta);
 

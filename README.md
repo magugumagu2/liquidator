@@ -16,6 +16,10 @@ forge install
 forge create ./src/Liquidator.sol:Liquidator --private-key <xyz> --rpc-url <xyz>
 ```
 
+Deployer: 0xE0157B2E81506f7710e62b331eb113B232e89efA
+Deployed to: 0xF508A8523DA51e75a9f0B8516F4cF2694095e04e
+Transaction hash: 0x39a579f8a38a6f8d073bb409385309ec93746887b8747ec863afc7901cbf5f75
+
 4. Build Rust Application
 
 a. cd to root of project
