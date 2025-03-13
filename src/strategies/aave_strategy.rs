@@ -8,7 +8,6 @@ use bindings_aave::{
     i_aave_oracle::IAaveOracle,
     i_pool_data_provider::IPoolDataProvider,
     ierc20::IERC20,
-    l2_encoder::L2Encoder,
     pool::{BorrowFilter, Pool, SupplyFilter},
 };
 use bindings_liquidator::liquidator::Liquidator;
@@ -38,14 +37,11 @@ struct DeploymentConfig {
     pool_address: Address,
     pool_data_provider: Address,
     oracle_address: Address,
-    l2_encoder: Address,
     creation_block: u64,
 }
 
 #[derive(Debug, Clone, Parser, ValueEnum)]
 pub enum Deployment {
-    AAVE,
-    SEASHELL,
     HYFI,
 }
 
@@ -64,29 +60,10 @@ pub const PRICE_ONE: u64 = 100000000;
 
 fn get_deployment_config(deployment: Deployment) -> DeploymentConfig {
     match deployment {
-        Deployment::AAVE => DeploymentConfig {
-            pool_address: Address::from_str("0xA238Dd80C259a72e81d7e4664a9801593F98d1c5").unwrap(),
-            pool_data_provider: Address::from_str("0x2d8A3C5677189723C4cB8873CfC9C8976FDF38Ac")
-                .unwrap(),
-            oracle_address: Address::from_str("0x2Cc0Fc26eD4563A5ce5e8bdcfe1A2878676Ae156")
-                .unwrap(),
-            l2_encoder: Address::from_str("0x39e97c588B2907Fb67F44fea256Ae3BA064207C5").unwrap(),
-            creation_block: 2963358,
-        },
-        Deployment::SEASHELL => DeploymentConfig {
-            pool_address: Address::from_str("0x8F44Fd754285aa6A2b8B9B97739B79746e0475a7").unwrap(),
-            pool_data_provider: Address::from_str("0x2A0979257105834789bC6b9E1B00446DFbA8dFBa")
-                .unwrap(),
-            oracle_address: Address::from_str("0xFDd4e83890BCcd1fbF9b10d71a5cc0a738753b01")
-                .unwrap(),
-            l2_encoder: Address::from_str("0xceceF475167f7BFD8995c0cbB577644b623cD7Cf").unwrap(),
-            creation_block: 3318602,
-        },
         Deployment::HYFI => DeploymentConfig {
             pool_address: Address::from_str("0x32467b43BFa67273FC7dDda0999Ee9A12F2AaA08").unwrap(),
             pool_data_provider: Address::from_str("0x0B306BF915C4d645ff596e518fAf3F9669b97016").unwrap(),
             oracle_address: Address::from_str("0x0E801D84Fa97b50751Dbf25036d067dCf18858bF").unwrap(),
-            l2_encoder: Address::from_str("0x49fd2BE640DB2910c2fAb69bB8531Ab6E76127ff").unwrap(),
             creation_block: 0,
         },
     }
@@ -755,14 +732,6 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
         );
 
         let liquidator = Liquidator::new(self.liquidator, self.client.clone());
-        let encoder = L2Encoder::new(self.config.l2_encoder, self.client.clone());
-        let (data0, data1) = encoder
-            .encode_liquidation_call(op.collateral, op.debt, op.borrower, op.debt_to_cover, false)
-            .call()
-            .await?;
-
-        info!("l2 encoder data0: {:?}", data0);
-        info!("l2 encoder data1: {:?}", data1);
 
         let swap_path = self.get_swap_path(&op.collateral, &op.debt)?;
 
