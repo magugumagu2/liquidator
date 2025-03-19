@@ -77,10 +77,8 @@ contract LiquidatorTest is Test {
         );
         uint256 expectedGain = expectedLiquidationReward - wethRequired;
 
-        (bytes32 arg1, bytes32 arg2) =
-            encoder.encodeLiquidationCall(address(weth), address(usdc), user, debtToCover, false);
         liquidator.liquidate(
-            address(weth), address(usdc), user, debtToCover, 0, address(liquidator), false, abi.encodePacked(address(usdc), poolFee, address(weth))
+            address(weth), address(usdc), user, debtToCover, abi.encodePacked(address(usdc), poolFee, address(weth)), "hyperswap"
         );
         assertEq(weth.balanceOf(address(liquidator)), expectedGain);
     }
@@ -105,7 +103,7 @@ contract LiquidatorTest is Test {
         (bytes32 arg1, bytes32 arg2) =
             encoder.encodeLiquidationCall(address(usdc), address(weth), user, debtToCover, false);
         liquidator.liquidate(
-            address(usdc), address(weth), user, debtToCover, 0, address(liquidator), false, abi.encodePacked(address(weth), poolFee, address(usdc))
+            address(usdc), address(weth), user, debtToCover, abi.encodePacked(address(weth), poolFee, address(usdc)), "hyperswap"
         );
         assertEq(usdc.balanceOf(address(liquidator)), expectedGain);
     }
@@ -120,9 +118,7 @@ contract LiquidatorTest is Test {
         (uint256 cbethRequired,,,) = quoter.quoteExactOutput(swapPath, debtToCover);
         uint256 expectedGain = expectedLiquidationReward - cbethRequired;
 
-        (bytes32 arg1, bytes32 arg2) =
-            encoder.encodeLiquidationCall(address(cbeth), address(usdc), user, debtToCover, false);
-        liquidator.liquidate(address(cbeth), address(usdc), user, debtToCover, 0, address(liquidator), true, swapPath);
+        liquidator.liquidate(address(cbeth), address(usdc), user, debtToCover, swapPath, "hyperswap");
         assertEq(cbeth.balanceOf(address(liquidator)), expectedGain);
     }
 
