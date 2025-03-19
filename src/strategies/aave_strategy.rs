@@ -29,6 +29,7 @@ use std::iter::zip;
 use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{debug, error, info};
+use ethers::types::{Eip1559TransactionRequest};
 
 use super::types::{Action, Event};
 
@@ -197,10 +198,10 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
 
         info!("Best op - profit: {}", op.profit_eth);
 
-        if op.profit_eth < I256::from(0) {
-            info!("No profitable ops, passing");
-            return vec![];
-        }
+        // if op.profit_eth < I256::from(0) {
+        //     info!("No profitable ops, passing");
+        //     return vec![];
+        // }
 
         // Check if user has sufficient debt token balance
         let has_balance = match self.check_user_balance(op.debt, op.debt_to_cover).await {
@@ -224,13 +225,15 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
             }
         };
 
-        let total_profit = match U256::from_dec_str(&op.profit_eth.to_string()) {
-            Ok(profit) => profit,
-            Err(e) => {
-                error!("Failed to convert profit: {}", e);
-                return vec![];
-            }
-        };
+        // let total_profit = match U256::from_dec_str(&op.profit_eth.to_string()) {
+        //     Ok(profit) => profit,
+        //     Err(e) => {
+        //         error!("Failed to convert profit: {}", e);
+        //         return vec![];
+        //     }
+        // };
+
+        let total_profit = U256::from(205_401_561_654_042u128);
 
         vec![Action::SubmitTx(SubmitTxToMempool {
             tx,
@@ -599,7 +602,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
     fn get_swap_path(&self, collateral: &Address, debt: &Address) -> Result<Bytes> {
         let weth_address = WETH_ADDRESS.parse::<Address>()?;
 
-        let pool_fee: u32 = 500;
+        let pool_fee: u32 = 3000;
         let pool_fee_encoded = pool_fee.to_be_bytes()[1..].to_vec(); // convert to uint24 by taking last 3 bytes only
         let mut path: Vec<Token> = Vec::new();
 
@@ -737,6 +740,8 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
 
         info!("swap path: {:?}", swap_path);
 
+        info!("collateral to liquidate: {:?}", op.collateral_to_liquidate);
+
         let contract_call = liquidator.liquidate(
             op.collateral,
             op.debt,
@@ -756,6 +761,9 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
     async fn build_liquidation(&self, op: &LiquidationOpportunity) -> Result<TypedTransaction> {
         let mut call = self.build_liquidation_call(op).await?;
         Ok(call.tx.set_chain_id(self.chain_id).clone())
+        // let _call = self.build_liquidation_call(op).await?;
+        // Ok(TypedTransaction::Eip1559(Eip1559TransactionRequest::new()
+        //     .chain_id(self.chain_id).clone()))
     }
 
     async fn check_user_balance(&self, token: Address, amount: U256) -> Result<bool> {

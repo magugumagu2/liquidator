@@ -5,7 +5,7 @@ import {ERC20} from "solmate/tokens/ERC20.sol";
 import {Test, console2} from "forge-std/Test.sol";
 import {MockOracle} from "../util/MockOracle.sol";
 import {Liquidator} from "../../src/Liquidator.sol";
-import {IL2Pool} from "../../src/interfaces/IL2Pool.sol";
+import {IPool} from "../../src/interfaces/IPool.sol";
 import {IL2Encoder} from "../../src/interfaces/IL2Encoder.sol";
 import {IAaveOracle} from "../../src/interfaces/IAaveOracle.sol";
 import {IPoolAddressesProvider} from "../../src/interfaces/IAddressesProvider.sol";
@@ -30,11 +30,12 @@ contract LiquidatorTest is Test {
     uint256 constant wethUnit = 10 ** 18;
     uint256 constant usdcUnit = 10 ** 6;
     Liquidator liquidator;
-    IL2Pool pool;
+    IPool pool;
     address user;
 
     function setUp() public {
         vm.createSelectFork(vm.envString("FORK_URL"));
+        vm.startPrank(aaveAdmin);
         oracle = new MockOracle();
         user = makeAddr("user");
         liquidator = new Liquidator();
@@ -50,7 +51,6 @@ contract LiquidatorTest is Test {
         oracle.setAssetPrice(address(usdc), 1 ether);
         oracle.setAssetPrice(address(cbeth), 1700 ether);
         oracle.setEthUsdPrice(1700 ether);
-        vm.startPrank(aaveAdmin);
 
         (address aToken,,) = dataProvider.getReserveTokensAddresses(address(cbeth));
         if (aToken == address(0)) {
@@ -80,7 +80,7 @@ contract LiquidatorTest is Test {
         (bytes32 arg1, bytes32 arg2) =
             encoder.encodeLiquidationCall(address(weth), address(usdc), user, debtToCover, false);
         liquidator.liquidate(
-            address(weth), debtToCover, arg1, arg2, abi.encodePacked(address(usdc), poolFee, address(weth))
+            address(weth), address(usdc), user, debtToCover, 0, address(liquidator), false, abi.encodePacked(address(usdc), poolFee, address(weth))
         );
         assertEq(weth.balanceOf(address(liquidator)), expectedGain);
     }
@@ -105,7 +105,7 @@ contract LiquidatorTest is Test {
         (bytes32 arg1, bytes32 arg2) =
             encoder.encodeLiquidationCall(address(usdc), address(weth), user, debtToCover, false);
         liquidator.liquidate(
-            address(usdc), debtToCover, arg1, arg2, abi.encodePacked(address(weth), poolFee, address(usdc))
+            address(usdc), address(weth), user, debtToCover, 0, address(liquidator), false, abi.encodePacked(address(weth), poolFee, address(usdc))
         );
         assertEq(usdc.balanceOf(address(liquidator)), expectedGain);
     }
@@ -122,7 +122,7 @@ contract LiquidatorTest is Test {
 
         (bytes32 arg1, bytes32 arg2) =
             encoder.encodeLiquidationCall(address(cbeth), address(usdc), user, debtToCover, false);
-        liquidator.liquidate(address(cbeth), debtToCover, arg1, arg2, swapPath);
+        liquidator.liquidate(address(cbeth), address(usdc), user, debtToCover, 0, address(liquidator), true, swapPath);
         assertEq(cbeth.balanceOf(address(liquidator)), expectedGain);
     }
 
@@ -142,8 +142,8 @@ contract LiquidatorTest is Test {
     {
         vm.startPrank(user);
         params.collateral.approve(address(pool), type(uint256).max);
-        pool.supply(encoder.encodeSupplyParams(address(params.collateral), params.collateralAmount, 0));
-        pool.borrow(encoder.encodeBorrowParams(address(params.debt), params.debtAmount, 2, 0));
+        pool.supply(address(params.collateral), params.collateralAmount, address(user), 0);
+        pool.borrow(address(params.debt), params.debtAmount, 2, 0, user);
         vm.stopPrank();
         uint256 debtAssetPrice = oracle.getAssetPrice(address(params.debt));
         oracle.setAssetPrice(address(params.collateral), params.collateralAssetPrice);

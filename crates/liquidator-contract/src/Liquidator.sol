@@ -8,55 +8,150 @@ import {IUniswapV3SwapCallback} from "./interfaces/IUniswapV3SwapCallback.sol";
 import {IUniswapV3PoolActions} from "./interfaces/IUniswapV3PoolActions.sol";
 import {PoolAddress} from "./lib/PoolAddress.sol";
 import {Path} from "./lib/Path.sol";
+import {IKittenPair} from "./interfaces/IKittenPair.sol";
+import {IKittenPairFactory} from "./interfaces/IKittenPairFactory.sol";
+import {KittenswapLib} from "./lib/KittenswapLib.sol";
+import {IKittenswapSwapCallback} from "./interfaces/IKittenswapSwapCallback.sol";
 
 uint160 constant MIN_SQRT_RATIO = 4295128739;
 /// @dev The maximum value that can be returned from #getSqrtRatioAtTick. Equivalent to getSqrtRatioAtTick(MAX_TICK)
 uint160 constant MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342;
 
-contract Liquidator is Owned(msg.sender), IUniswapV3SwapCallback {
+contract Liquidator is Owned(msg.sender), IUniswapV3SwapCallback, IKittenswapSwapCallback {
     struct SwapCallbackData {
         bytes path;
         address collateralAsset;
         address debtAsset;
         address user;
         uint256 debtToCover;
-        uint256 liquidatedCollateralAmount;
-        address liquidator;
-        bool receiveAToken;
+        uint256 amountToPay;
     }
 
-    address private constant uniswapV3Factory = 0xccf1769D8713099172642EB55DDFFC0c5A444FE9;
+    address private constant uniswapV3Factory = 0x22a9B82A6c3D2BFB68F324B2e8367f346Dd6f32a;
+    address private constant kittenPairFactory = 0xDa12F450580A4cc485C3b501BAB7b0B3cbc3B31B;
     IPool public constant pool = IPool(0x32467b43BFa67273FC7dDda0999Ee9A12F2AaA08);
+
+    IKittenPair private activeKittenPair;
 
     constructor() {}
 
-    /// @notice Performs a liquidation using a Uniswap v3 flash swap
-    /// @param collateral address of the collateral asset to be liquidated
+    /// @notice Performs a liquidation using a flash swap
+    /// @param collateralAsset address of the collateral asset to be liquidated
     /// @param debtAsset address of the debt asset to be repaid
     /// @param user address of the user to be liquidated
     /// @param debtToCover amount of debt asset to repay in exchange for collateral
-    /// @param liquidatedCollateralAmount amount of collateral to liquidate
-    /// @param liquidator address that will receive the liquidated collateral
-    /// @param receiveAToken true if the liquidator wants to receive aTokens, false for underlying asset
     /// @param swapPath encoded path of pools to swap collateral through, see: https://docs.uniswap.org/contracts/v3/guides/swaps/multihop-swaps
+    /// @param swapVenue venue of the swap, either "kittenswap" or "hyperswap"
     function liquidate(
-        address collateral,
+        address collateralAsset,
         address debtAsset,
         address user,
         uint256 debtToCover,
-        uint256 liquidatedCollateralAmount,
-        address liquidator,
-        bool receiveAToken,
-        bytes calldata swapPath
+        bytes calldata swapPath,
+        string calldata swapVenue
     ) external onlyOwner returns (int256 collateralGain) {
-        uint256 collateralBalance = ERC20(collateral).balanceOf(address(this));
+        uint256 collateralBalance = ERC20(collateralAsset).balanceOf(address(this));
 
-        swapOutUniswap(
-            debtToCover,
-            SwapCallbackData({path: swapPath, collateralAsset: collateral, debtAsset: debtAsset, user: user, debtToCover: debtToCover, liquidatedCollateralAmount: liquidatedCollateralAmount, liquidator: liquidator, receiveAToken: receiveAToken})
+        if (keccak256(abi.encodePacked(swapVenue)) == keccak256(abi.encodePacked("kittenswap"))) {
+            swapOutKittenswap(
+                debtToCover,
+                SwapCallbackData({path: swapPath, collateralAsset: collateralAsset, debtAsset: debtAsset, user: user, debtToCover: debtToCover, amountToPay: 0})
+            );
+        } else if (keccak256(abi.encodePacked(swapVenue)) == keccak256(abi.encodePacked("hyperswap"))) {
+            swapOutUniswap(
+                debtToCover,
+                SwapCallbackData({path: swapPath, collateralAsset: collateralAsset, debtAsset: debtAsset, user: user, debtToCover: debtToCover, amountToPay: 0})
+            );
+        } else {
+            revert("Invalid swap venue");
+        }
+
+        collateralGain = int256(ERC20(collateralAsset).balanceOf(address(this))) - int256(collateralBalance);
+    }
+
+    /// @dev Performs a single exact output swap
+    function swapOutKittenswap(uint256 amountOut, SwapCallbackData memory data) internal {
+        (address tokenOut, address tokenIn, uint24 fee) = Path.decodeFirstPool(data.path);
+
+        // path is reversed for exact output swaps
+        bool zeroForOne = !(tokenIn < tokenOut);
+
+        // storage is set for both directions; no address sorting necessary
+        activeKittenPair = IKittenPair(IKittenPairFactory(kittenPairFactory).getPair(tokenIn, tokenOut, true));
+
+        if (address(activeKittenPair) == address(0)) {
+            revert("Invalid kitten pair");
+        }
+
+        data.amountToPay = KittenswapLib.getAmountIn(
+            KittenswapLib.GetAmountInArgs({
+                pair: address(activeKittenPair),
+                factory: address(kittenPairFactory),
+                amountOut: data.debtToCover,
+                tokenOut: tokenIn, // exact output swaps are reversed
+                stable: false // use volatile pairs for now
+            })
         );
 
-        collateralGain = int256(ERC20(collateral).balanceOf(address(this))) - int256(collateralBalance);
+        activeKittenPair.swap(
+            zeroForOne ? 0 : amountOut,
+            zeroForOne ? amountOut : 0,
+            address(this),
+            abi.encode(data)
+        );
+
+        activeKittenPair = IKittenPair(address(0));
+    }
+
+    /// @inheritdoc IKittenswapSwapCallback
+    function hook(address sender, uint256 amount0Out, uint256 amount1Out, bytes calldata _data) external override {
+        // validate msg.sender is kitten pair
+        if (msg.sender != address(activeKittenPair)) {
+            revert("msg.sender != activeKittenPair");
+        }
+
+        SwapCallbackData memory data = abi.decode(_data, (SwapCallbackData));
+
+        (address tokenIn, address tokenOut, uint24 fee) = Path.decodeFirstPool(data.path);
+
+        pool.liquidationCall(
+            data.collateralAsset,
+            data.debtAsset,
+            data.user,
+            data.debtToCover,
+            false // receiveAToken is false so we can repay the swap
+        );
+
+        // either initiate the next swap or pay
+        if (Path.hasMultiplePools(data.path)) {
+            data.path = Path.skipToken(data.path);
+            swapOutKittenswap(data.amountToPay, data);
+        }
+
+        tokenIn = tokenOut; // swap in/out because exact output swaps are reversed
+
+        ERC20(tokenIn).transfer(msg.sender, data.amountToPay);
+    }
+
+    /// @dev Performs a single exact output swap
+    function swapOutUniswap(uint256 amountOut, SwapCallbackData memory data) internal {
+        (address tokenOut, address tokenIn, uint24 fee) = Path.decodeFirstPool(data.path);
+
+        bool zeroForOne = tokenIn < tokenOut;
+
+        IUniswapV3PoolActions uniswapPool = IUniswapV3PoolActions(
+            PoolAddress.computeAddress(uniswapV3Factory, PoolAddress.getPoolKey(tokenIn, tokenOut, fee))
+        );
+
+        uniswapPool.token0();
+
+        uniswapPool.swap(
+            address(this),
+            zeroForOne,
+            -int256(amountOut),
+            zeroForOne ? MIN_SQRT_RATIO + 1 : MAX_SQRT_RATIO - 1,
+            abi.encode(data)
+        );
     }
 
     /// @inheritdoc IUniswapV3SwapCallback
@@ -71,7 +166,7 @@ contract Liquidator is Owned(msg.sender), IUniswapV3SwapCallback {
             data.debtAsset,
             data.user,
             data.debtToCover,
-            data.receiveAToken
+            false // receiveAToken is false so we can repay the swap
         );
 
         uint256 amountToPay = amount0Delta > 0 ? uint256(amount0Delta) : uint256(amount1Delta);
@@ -83,26 +178,8 @@ contract Liquidator is Owned(msg.sender), IUniswapV3SwapCallback {
         }
 
         tokenIn = tokenOut; // swap in/out because exact output swaps are reversed
+
         ERC20(tokenIn).transfer(msg.sender, amountToPay);
-    }
-
-    /// @dev Performs a single exact output swap
-    function swapOutUniswap(uint256 amountOut, SwapCallbackData memory data) internal {
-        (address tokenOut, address tokenIn, uint24 fee) = Path.decodeFirstPool(data.path);
-
-        bool zeroForOne = tokenIn < tokenOut;
-
-        IUniswapV3PoolActions uniswapPool = IUniswapV3PoolActions(
-            PoolAddress.computeAddress(uniswapV3Factory, PoolAddress.getPoolKey(tokenIn, tokenOut, fee))
-        );
-
-        uniswapPool.swap(
-            address(this),
-            zeroForOne,
-            -int256(amountOut),
-            zeroForOne ? MIN_SQRT_RATIO + 1 : MAX_SQRT_RATIO - 1,
-            abi.encode(data)
-        );
     }
 
     /// @notice Approve max ERC-20 allowance to Aave pool to save gas and not have to approve every liquidation
