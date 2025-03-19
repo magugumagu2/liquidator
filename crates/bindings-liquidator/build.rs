@@ -4,7 +4,7 @@ fn main() {
     // Generate the bindings
     Abigen::new(
         "Liquidator",                                    // Contract name
-        "./abi/Liquidator.json",                        // ABI location
+        "../liquidator-contract/out/Liquidator.sol/Liquidator.json",                        // ABI location
     )
     .expect("Could not instantiate Abigen")
     .generate()

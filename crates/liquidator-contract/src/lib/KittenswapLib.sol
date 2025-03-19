@@ -37,8 +37,8 @@ library KittenswapLib {
                 token1: IKittenPair(args.pair).token1()
             })
         );
-        // add fee to amount in
-        return (amountIn * 10000) / (10000 - IKittenPairFactory(args.factory).getFee(address(this), args.stable));
+        // add fee to amount in; round up for safety
+        return (amountIn * 10000) / (10000 - IKittenPairFactory(args.factory).getFee(address(this), args.stable)) + 1;
     }
 
     struct GetAmountInLocals {
