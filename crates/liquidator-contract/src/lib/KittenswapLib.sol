@@ -86,7 +86,42 @@ library KittenswapLib {
         }
     }
 
-    function _get_x(uint reserveOut, uint xy, uint reserveIn) internal view returns (uint) {
-        return (xy * reserveIn) / (reserveOut - xy);
+    function _get_x(uint y0, uint xy, uint x) internal pure returns (uint) {
+        for (uint i = 0; i < 255; i++) {
+            uint x_prev = x;
+            uint k = _f(x, y0);
+            if (k < xy) {
+                uint dx = ((xy - k) * 1e18) / _d(x, y0);
+                x = x + dx;
+            } else {
+                uint dx = ((k - xy) * 1e18) / _d(x, y0);
+                x = x - dx;
+            }
+            if (x > x_prev) {
+                if (x - x_prev <= 1) {
+                    return x;
+                }
+            } else {
+                if (x_prev - x <= 1) {
+                    return x;
+                }
+            }
+        }
+        return x;
+    }
+
+    function _f(uint x, uint y0) internal pure returns (uint) {
+        return
+            (y0 * ((((x * x) / 1e18) * x) / 1e18)) /
+            1e18 +
+            (((((y0 * y0) / 1e18) * y0) / 1e18) * x) /
+            1e18;
+    }
+
+    function _d(uint x, uint y0) internal pure returns (uint) {
+        return
+            (3 * y0 * ((x * x) / 1e18)) /
+            1e18 +
+            ((((y0 * y0) / 1e18) * y0) / 1e18);
     }
 }
