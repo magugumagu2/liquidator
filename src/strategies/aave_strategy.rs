@@ -35,6 +35,7 @@ use super::types::{Action, Event};
 
 #[derive(Debug)]
 struct DeploymentConfig {
+    state_cache_file: String,
     pool_address: Address,
     pool_data_provider: Address,
     oracle_address: Address,
@@ -56,12 +57,12 @@ pub const DEFAULT_LIQUIDATION_CLOSE_FACTOR: u64 = 5000;
 // admin stuff
 pub const LOG_BLOCK_RANGE: u64 = 1000;
 pub const MULTICALL_CHUNK_SIZE: usize = 100;
-pub const STATE_CACHE_FILE: &str = "borrowers-hyperevm-mainnet.json";
 pub const PRICE_ONE: u64 = 100000000;
 
 fn get_deployment_config(deployment: Deployment) -> DeploymentConfig {
     match deployment {
         Deployment::MOCKNET => DeploymentConfig {
+            state_cache_file: "borrowers-mocknet.json".to_string(),
             pool_address: Address::from_str("0x32467b43BFa67273FC7dDda0999Ee9A12F2AaA08").unwrap(),
             pool_data_provider: Address::from_str("0x0B306BF915C4d645ff596e518fAf3F9669b97016").unwrap(),
             oracle_address: Address::from_str("0x0E801D84Fa97b50751Dbf25036d067dCf18858bF").unwrap(),
@@ -71,6 +72,7 @@ fn get_deployment_config(deployment: Deployment) -> DeploymentConfig {
 
         },
         Deployment::HYFI => DeploymentConfig {
+            state_cache_file: "borrowers-hyperevm-mainnet.json".to_string(),
             pool_address: Address::from_str("0xceCcE0EB9DD2Ef7996e01e25DD70e461F918A14b").unwrap(),
             pool_data_provider: Address::from_str("0x7b883191011AEAe40581d3Fa1B112413808C9c00").unwrap(),
             oracle_address: Address::from_str("0x9BE2ac1ff80950DCeb816842834930887249d9A8").unwrap(),
@@ -301,7 +303,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
 
     // load borrower state cache from file if exists
     fn load_cache(&mut self) -> Result<()> {
-        match File::open(STATE_CACHE_FILE) {
+        match File::open(self.config.state_cache_file.clone()) {
             Ok(file) => {
                 let cache: StateCache = serde_json::from_reader(file)?;
                 info!("read state cache from file");
@@ -323,7 +325,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
             last_block_number: block_number,
             borrowers: self.borrowers.clone(),
         };
-        if let Err(e) = File::create(STATE_CACHE_FILE)
+        if let Err(e) = File::create(self.config.state_cache_file.clone())
             .and_then(|mut file| file.write_all(serde_json::to_string(&cache)?.as_bytes()))
         {
             error!("Failed to write intermediate cache: {}", e);
@@ -408,7 +410,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
             last_block_number: self.last_block_number,
             borrowers: self.borrowers.clone(),
         };
-        File::create(STATE_CACHE_FILE)?.write_all(serde_json::to_string(&cache)?.as_bytes())?;
+        File::create(self.config.state_cache_file.clone())?.write_all(serde_json::to_string(&cache)?.as_bytes())?;
 
         Ok(())
     }
