@@ -29,7 +29,7 @@ use std::iter::zip;
 use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{debug, error, info};
-use ethers::types::{Eip1559TransactionRequest};
+// use ethers::types::{Eip1559TransactionRequest};
 
 use super::types::{Action, Event};
 
@@ -38,16 +38,16 @@ struct DeploymentConfig {
     pool_address: Address,
     pool_data_provider: Address,
     oracle_address: Address,
+    weth_address: Address,
+    multicall3_address: Address,
     creation_block: u64,
 }
 
 #[derive(Debug, Clone, Parser, ValueEnum)]
 pub enum Deployment {
+    MOCKNET,
     HYFI,
 }
-
-pub const WETH_ADDRESS: &str = "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0";
-pub const MULTICALL3_ADDRESS: &str = "0x720472c8ce72c2A2D711333e064ABD3E6BbEAdd3";
 
 pub const LIQUIDATION_CLOSE_FACTOR_THRESHOLD: &str = "950000000000000000";
 pub const MAX_LIQUIDATION_CLOSE_FACTOR: u64 = 10000;
@@ -56,16 +56,27 @@ pub const DEFAULT_LIQUIDATION_CLOSE_FACTOR: u64 = 5000;
 // admin stuff
 pub const LOG_BLOCK_RANGE: u64 = 1000;
 pub const MULTICALL_CHUNK_SIZE: usize = 100;
-pub const STATE_CACHE_FILE: &str = "borrowers.json";
+pub const STATE_CACHE_FILE: &str = "borrowers-hyperevm-mainnet.json";
 pub const PRICE_ONE: u64 = 100000000;
 
 fn get_deployment_config(deployment: Deployment) -> DeploymentConfig {
     match deployment {
-        Deployment::HYFI => DeploymentConfig {
+        Deployment::MOCKNET => DeploymentConfig {
             pool_address: Address::from_str("0x32467b43BFa67273FC7dDda0999Ee9A12F2AaA08").unwrap(),
             pool_data_provider: Address::from_str("0x0B306BF915C4d645ff596e518fAf3F9669b97016").unwrap(),
             oracle_address: Address::from_str("0x0E801D84Fa97b50751Dbf25036d067dCf18858bF").unwrap(),
+            weth_address: Address::from_str("0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0").unwrap(),
+            multicall3_address: Address::from_str("0x720472c8ce72c2A2D711333e064ABD3E6BbEAdd3").unwrap(),
             creation_block: 0,
+
+        },
+        Deployment::HYFI => DeploymentConfig {
+            pool_address: Address::from_str("0xceCcE0EB9DD2Ef7996e01e25DD70e461F918A14b").unwrap(),
+            pool_data_provider: Address::from_str("0x7b883191011AEAe40581d3Fa1B112413808C9c00").unwrap(),
+            oracle_address: Address::from_str("0x9BE2ac1ff80950DCeb816842834930887249d9A8").unwrap(),
+            weth_address: Address::from_str("0x5555555555555555555555555555555555555555").unwrap(),
+            multicall3_address: Address::from_str("0xa66aeb1c0a579ad95ba3940d18faad02c368a383").unwrap(),
+            creation_block: 82245,
         },
     }
 }
@@ -253,7 +264,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
         // call pool.getUserAccountData(user) for each borrower
         let mut multicall = Multicall::new(
             self.client.clone(),
-            Some(H160::from_str(MULTICALL3_ADDRESS)?),
+            Some(H160::from_str(self.config.multicall3_address.to_string().as_str())?),
         )
         .await?;
         let borrowers: Vec<&Borrower> = self
@@ -371,7 +382,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
 
         info!("Getting supply logs");
 
-        for chunk_start in (self.config.creation_block..latest_block.as_u64()).step_by(BLOCK_CHUNK_SIZE as usize) {
+        for chunk_start in (self.last_block_number..latest_block.as_u64()).step_by(BLOCK_CHUNK_SIZE as usize) {
             let chunk_end = std::cmp::min(chunk_start + BLOCK_CHUNK_SIZE, latest_block.as_u64());
             info!("Getting supply logs from {} to {}", chunk_start, chunk_end);
             self.get_supply_logs(chunk_start.into(), chunk_end.into())
@@ -524,7 +535,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
     // 8 decimals of precision
     async fn get_asset_price_eth(&self, asset: &Address, pool_state: &PoolState) -> Result<U256> {
         // 1:1 for weth
-        let weth_address = WETH_ADDRESS.parse::<Address>().unwrap();
+        let weth_address = self.config.weth_address;
         if asset.eq(&weth_address) {
             return Ok(U256::from(PRICE_ONE));
         }
@@ -600,7 +611,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
     // Assumes there are WETH pairs for both collateral and debt asset types and that all pools have 500 fee
     // TODO: handle arbitrary pool fees and path
     fn get_swap_path(&self, collateral: &Address, debt: &Address) -> Result<Bytes> {
-        let weth_address = WETH_ADDRESS.parse::<Address>()?;
+        let weth_address = self.config.weth_address;
 
         let pool_fee: u32 = 3000;
         let pool_fee_encoded = pool_fee.to_be_bytes()[1..].to_vec(); // convert to uint24 by taking last 3 bytes only
@@ -629,7 +640,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
     async fn get_pool_state(&self) -> Result<PoolState> {
         let mut multicall = Multicall::<M>::new(
             self.client.clone(),
-            Some(H160::from_str(MULTICALL3_ADDRESS)?),
+            Some(H160::from_str(self.config.multicall3_address.to_string().as_str())?),
         )
         .await?;
         let mut prices = HashMap::new();
