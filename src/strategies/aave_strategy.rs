@@ -41,6 +41,7 @@ struct DeploymentConfig {
     oracle_address: Address,
     weth_address: Address,
     multicall3_address: Address,
+    swap_venue: String,
     creation_block: u64,
 }
 
@@ -68,6 +69,7 @@ fn get_deployment_config(deployment: Deployment) -> DeploymentConfig {
             oracle_address: Address::from_str("0x0E801D84Fa97b50751Dbf25036d067dCf18858bF").unwrap(),
             weth_address: Address::from_str("0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0").unwrap(),
             multicall3_address: Address::from_str("0x720472c8ce72c2A2D711333e064ABD3E6BbEAdd3").unwrap(),
+            swap_venue: "hyperswap".to_string(),
             creation_block: 0,
 
         },
@@ -78,6 +80,7 @@ fn get_deployment_config(deployment: Deployment) -> DeploymentConfig {
             oracle_address: Address::from_str("0x9BE2ac1ff80950DCeb816842834930887249d9A8").unwrap(),
             weth_address: Address::from_str("0x5555555555555555555555555555555555555555").unwrap(),
             multicall3_address: Address::from_str("0xa66aeb1c0a579ad95ba3940d18faad02c368a383").unwrap(),
+            swap_venue: "kittenswap".to_string(),
             creation_block: 82245,
         },
     }
@@ -760,10 +763,8 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
             op.debt,
             op.borrower,
             op.debt_to_cover,
-            op.collateral_to_liquidate,
-            self.liquidator,
-            true,
             Bytes::from(swap_path),
+            self.config.swap_venue.clone(),
         );
 
         debug!("Liquidation op contract call: {:?}", contract_call);
