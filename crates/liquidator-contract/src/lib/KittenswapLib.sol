@@ -25,6 +25,13 @@ library KittenswapLib {
         address tokenOut;
     }
 
+    struct GetAmountOutArgs {
+        address pair;
+        address factory;
+        uint amountIn;
+        address tokenIn;
+    }
+
     struct GetXArgs {
         uint256 y0;
         uint256 xy;
@@ -73,7 +80,14 @@ library KittenswapLib {
 
         return amountIn;
     }
-    
+
+    function getAmountOut(
+        GetAmountOutArgs memory args
+    ) internal view returns (uint256) {
+        return IKittenPair(args.pair).getAmountOut(args.amountIn, args.tokenIn);
+    }
+
+
     function _getAmountIn(
         GetAmountInArgs memory args,
         Metadata memory metadata

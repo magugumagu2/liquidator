@@ -30,4 +30,6 @@ interface IKittenPair {
     function reserve0() external view virtual returns (uint);
 
     function reserve1() external view virtual returns (uint);
+
+    function getAmountOut(uint amountIn, address tokenIn) external view virtual returns (uint);
 }
