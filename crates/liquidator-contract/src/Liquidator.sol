@@ -58,6 +58,16 @@ contract Liquidator is Owned(msg.sender), IKittenswapSwapCallback, IUniswapV3Swa
         _;
     }
 
+    modifier noInt256Overflow(address collateralAsset, address debtAsset) {
+        if (ERC20(collateralAsset).balanceOf(address(this)) > uint256(type(int256).max)) {
+            revert("Collateral asset balance too large");
+        }
+        if (ERC20(debtAsset).balanceOf(address(this)) > uint256(type(int256).max)) {
+            revert("Debt asset balance too large");
+        }
+        _;
+    }
+
     /// @notice Enable or disable a liquidator
     /// @param _liquidator address of the liquidator
     /// @param _enabled true to enable, false to disable
@@ -80,13 +90,7 @@ contract Liquidator is Owned(msg.sender), IKittenswapSwapCallback, IUniswapV3Swa
         uint256 debtToCover,
         bytes calldata swapPath,
         string calldata liqPath
-    ) external onlyOwnerOrLiquidator returns (address finalToken, int256 finalGain) {
-        if (ERC20(collateralAsset).balanceOf(address(this)) > uint256(type(int256).max)) {
-            revert("Collateral asset balance too large");
-        }
-        if (ERC20(debtAsset).balanceOf(address(this)) > uint256(type(int256).max)) {
-            revert("Debt asset balance too large");
-        }
+    ) external onlyOwnerOrLiquidator noInt256Overflow(collateralAsset, debtAsset) returns (address finalToken, int256 finalGain) {
         if (keccak256(abi.encodePacked(liqPath)) == keccak256(abi.encodePacked("kittenswap"))) {
             // swap ends with collateral asset
             finalToken = collateralAsset;
