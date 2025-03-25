@@ -78,7 +78,12 @@ contract LiquidatorTest is Test {
         uint256 expectedGain = expectedLiquidationReward - wethRequired;
 
         liquidator.liquidate(
-            address(weth), address(usdc), user, debtToCover, abi.encodePacked(address(usdc), poolFee, address(weth)), "hyperswap"
+            address(weth),
+            address(usdc),
+            user,
+            debtToCover,
+            abi.encodePacked(address(usdc), poolFee, address(weth)),
+            "hyperswap"
         );
         assertEq(weth.balanceOf(address(liquidator)), expectedGain);
     }
@@ -101,7 +106,12 @@ contract LiquidatorTest is Test {
         uint256 expectedGain = expectedLiquidationReward - usdcRequired;
 
         liquidator.liquidate(
-            address(usdc), address(weth), user, debtToCover, abi.encodePacked(address(weth), poolFee, address(usdc)), "hyperswap"
+            address(usdc),
+            address(weth),
+            user,
+            debtToCover,
+            abi.encodePacked(address(weth), poolFee, address(usdc)),
+            "hyperswap"
         );
         assertEq(usdc.balanceOf(address(liquidator)), expectedGain);
     }

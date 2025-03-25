@@ -279,7 +279,6 @@ library BytesLib {
         return tempBool;
     }
 
-
     function toAddress(bytes memory _bytes, uint256 _start) internal pure returns (address) {
         require(_bytes.length >= _start + 20, "toAddress_outOfBounds");
         address tempAddress;
