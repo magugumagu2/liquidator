@@ -8,7 +8,7 @@ import {Liquidator} from "../../src/Liquidator.sol";
 import {IPool} from "../../src/interfaces/IPool.sol";
 import {IL2Encoder} from "../../src/interfaces/IL2Encoder.sol";
 import {IAaveOracle} from "../../src/interfaces/IAaveOracle.sol";
-import {IPoolAddressesProvider} from "../../src/interfaces/IAddressesProvider.sol";
+import {IPoolAddressesProvider} from "../../src/interfaces/IPoolAddressesProvider.sol";
 import {IPoolDataProvider} from "../../src/interfaces/IPoolDataProvider.sol";
 import {IPoolConfigurator} from "../../src/interfaces/IPoolConfigurator.sol";
 import {ConfiguratorInputTypes} from "../../src/interfaces/ConfiguratorInputTypes.sol";
@@ -100,8 +100,6 @@ contract LiquidatorTest is Test {
         );
         uint256 expectedGain = expectedLiquidationReward - usdcRequired;
 
-        (bytes32 arg1, bytes32 arg2) =
-            encoder.encodeLiquidationCall(address(usdc), address(weth), user, debtToCover, false);
         liquidator.liquidate(
             address(usdc), address(weth), user, debtToCover, abi.encodePacked(address(weth), poolFee, address(usdc)), "hyperswap"
         );

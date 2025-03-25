@@ -7,12 +7,11 @@ interface IKittenPair {
         uint256 amount1Out,
         address to,
         bytes calldata data
-    ) external virtual;
+    ) external;
 
     function metadata()
         external
         view
-        virtual
         returns (
             uint dec0,
             uint dec1,
@@ -23,13 +22,13 @@ interface IKittenPair {
             address t1
         );
     
-    function token0() external view virtual returns (address);
+    function token0() external view returns (address);
 
-    function token1() external view virtual returns (address);
+    function token1() external view returns (address);
 
-    function reserve0() external view virtual returns (uint);
+    function reserve0() external view returns (uint);
 
-    function reserve1() external view virtual returns (uint);
+    function reserve1() external view returns (uint);
 
-    function getAmountOut(uint amountIn, address tokenIn) external view virtual returns (uint);
+    function getAmountOut(uint amountIn, address tokenIn) external view returns (uint);
 }
