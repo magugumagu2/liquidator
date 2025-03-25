@@ -66,7 +66,6 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
-    println!("{:?}", args);
 
     // Set up ethers provider.
     let archive_rpc = Http::from_str(&args.archive_rpc)?;
