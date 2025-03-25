@@ -5,7 +5,7 @@ use ethers::types::Bytes;
 use std::collections::HashMap;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct SwapPathConfig {
+pub struct LiqPathConfig {
     #[serde(with = "token_pair_map_serde")]
     pub pairs: HashMap<(Address, Address), Vec<LiquidationPath>>,
 }
@@ -80,10 +80,10 @@ mod token_pair_map_serde {
     }
 }
 
-impl SwapPathConfig {
+impl LiqPathConfig {
     pub fn load_from_file(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let file = std::fs::File::open(path)?;
-        let config: SwapPathConfig = serde_json::from_reader(file)?;
+        let config: LiqPathConfig = serde_json::from_reader(file)?;
         Ok(config)
     }
 
@@ -106,7 +106,7 @@ impl SwapPathConfig {
         path.swap_path.first()
     }
 
-    pub fn build_swap_path(&self, collateral: &Address, debt: &Address) -> Option<(Bytes, String)> {
+    pub fn build_liq_path(&self, collateral: &Address, debt: &Address) -> Option<(Bytes, String)> {
         // Sort addresses for lookup
         let (first, second) = if collateral < debt {
             (collateral, debt)
