@@ -81,31 +81,50 @@ contract Liquidator is Owned(msg.sender), IKittenswapSwapCallback, IUniswapV3Swa
         bytes calldata swapPath,
         string calldata liqPath
     ) external onlyOwnerOrLiquidator returns (address finalToken, int256 finalGain) {
-        uint256 startBalance;
-
         if (keccak256(abi.encodePacked(liqPath)) == keccak256(abi.encodePacked("kittenswap"))) {
-            startBalance = ERC20(collateralAsset).balanceOf(address(this));
+            // swap ends with collateral asset
+            finalToken = collateralAsset;
+
+            // get balance before liquidation
+            finalGain = ERC20(collateralAsset).balanceOf(address(this));
+            
+            // execute liquidation and swap(s)
             _swapOutKittenswap(
                 debtToCover,
                 SwapCallbackData({path: swapPath, collateralAsset: collateralAsset, debtAsset: debtAsset, user: user, debtToCover: debtToCover, amountToPay: 0, liquidateUser: true, swapOut: true})
             );
-            finalToken = collateralAsset;
+
+            // calculate final gain
             finalGain = int256(ERC20(collateralAsset).balanceOf(address(this))) - int256(startBalance);
         } else if (keccak256(abi.encodePacked(liqPath)) == keccak256(abi.encodePacked("hyperswap"))) {
-            startBalance = ERC20(collateralAsset).balanceOf(address(this));
+            // swap ends with collateral asset
+            finalToken = collateralAsset;
+
+            // get balance before liquidation
+            finalGain = ERC20(collateralAsset).balanceOf(address(this));
+
+            // execute liquidation and swap(s)
             _swapOutUniswapV3(
                 debtToCover,
                 SwapCallbackData({path: swapPath, collateralAsset: collateralAsset, debtAsset: debtAsset, user: user, debtToCover: debtToCover, amountToPay: 0, liquidateUser: true, swapOut: true})
             );
-            finalToken = collateralAsset;
+
+            // calculate final gain
             finalGain = int256(ERC20(collateralAsset).balanceOf(address(this))) - int256(startBalance);
         } else if (keccak256(abi.encodePacked(liqPath)) == keccak256(abi.encodePacked("usdxlFlashMinter"))) {
-            startBalance = ERC20(debtAsset).balanceOf(address(this));
+            // swap ends with debt asset (USDXL)
+            finalToken = debtAsset;
+
+            // get balance before flash loan
+            finalGain = ERC20(debtAsset).balanceOf(address(this));
+
+            // execute flash loan, liquidate, and swap to USDXL
             _flashLoanUsdxl(
                 debtToCover,
                 SwapCallbackData({path: swapPath, collateralAsset: collateralAsset, debtAsset: debtAsset, user: user, debtToCover: debtToCover, amountToPay: 0, liquidateUser: false, swapOut: false})
             );
-            finalToken = debtAsset;
+
+            // calculate final gain
             finalGain = int256(ERC20(debtAsset).balanceOf(address(this))) - int256(startBalance);
         } else {
             revert("Invalid liquidation path");

@@ -29,7 +29,7 @@ use std::iter::zip;
 use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{debug, error, info};
-// use ethers::types::{Eip1559TransactionRequest};
+use crate::strategies::swap_path_config::SwapPathConfig;
 
 use super::types::{Action, Event};
 
@@ -41,7 +41,8 @@ struct DeploymentConfig {
     oracle_address: Address,
     weth_address: Address,
     multicall3_address: Address,
-    swap_venue: String,
+    usdxl_address: Address,
+    default_liq_path: Option<String>,
     creation_block: u64,
 }
 
@@ -58,7 +59,7 @@ pub const DEFAULT_LIQUIDATION_CLOSE_FACTOR: u64 = 5000;
 // admin stuff
 pub const LOG_BLOCK_RANGE: u64 = 1000;
 pub const MULTICALL_CHUNK_SIZE: usize = 100;
-pub const PRICE_ONE: u64 = 100000000;
+pub const PRICE_ONE: u64 = 100_000_000;
 
 fn get_deployment_config(deployment: Deployment) -> DeploymentConfig {
     match deployment {
@@ -69,9 +70,9 @@ fn get_deployment_config(deployment: Deployment) -> DeploymentConfig {
             oracle_address: Address::from_str("0x0E801D84Fa97b50751Dbf25036d067dCf18858bF").unwrap(),
             weth_address: Address::from_str("0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0").unwrap(),
             multicall3_address: Address::from_str("0x720472c8ce72c2A2D711333e064ABD3E6BbEAdd3").unwrap(),
-            swap_venue: "hyperswap".to_string(),
+            usdxl_address: Address::from_str("0xca79db4B49f608eF54a5CB813FbEd3a6387bC645").unwrap(),
+            default_liq_path: Some("hyperswap".to_string()),
             creation_block: 0,
-
         },
         Deployment::HYFI => DeploymentConfig {
             state_cache_file: "borrowers-hyperevm-mainnet.json".to_string(),
@@ -80,7 +81,8 @@ fn get_deployment_config(deployment: Deployment) -> DeploymentConfig {
             oracle_address: Address::from_str("0x9BE2ac1ff80950DCeb816842834930887249d9A8").unwrap(),
             weth_address: Address::from_str("0x5555555555555555555555555555555555555555").unwrap(),
             multicall3_address: Address::from_str("0xa66aeb1c0a579ad95ba3940d18faad02c368a383").unwrap(),
-            swap_venue: "kittenswap".to_string(),
+            usdxl_address: Address::from_str("0xca79db4B49f608eF54a5CB813FbEd3a6387bC645").unwrap(),
+            default_liq_path: None,
             creation_block: 82245,
         },
     }
@@ -244,15 +246,13 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
             }
         };
 
-        // let total_profit = match U256::from_dec_str(&op.profit_eth.to_string()) {
-        //     Ok(profit) => profit,
-        //     Err(e) => {
-        //         error!("Failed to convert profit: {}", e);
-        //         return vec![];
-        //     }
-        // };
-
-        let total_profit = U256::from(205_401_561_654_042u128);
+        let total_profit = match U256::from_dec_str(&op.profit_eth.to_string()) {
+            Ok(profit) => profit,
+            Err(e) => {
+                error!("Failed to convert profit: {}", e);
+                return vec![];
+            }
+        };
 
         vec![Action::SubmitTx(SubmitTxToMempool {
             tx,
@@ -626,31 +626,52 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
 
     // Assumes there are WETH pairs for both collateral and debt asset types and that all pools have 500 fee
     // TODO: handle arbitrary pool fees and path
-    fn get_swap_path(&self, collateral: &Address, debt: &Address) -> Result<Bytes> {
+    fn get_swap_path(&self, collateral: &Address, debt: &Address) -> Result<(Bytes, String)> {
         let weth_address = self.config.weth_address;
+        let usdxl_address = self.config.usdxl_address;
 
         let pool_fee: u32 = 3000;
         let pool_fee_encoded = pool_fee.to_be_bytes()[1..].to_vec(); // convert to uint24 by taking last 3 bytes only
         let mut path: Vec<Token> = Vec::new();
 
-        // We first want to swap for debt
-        path.push(Token::Address(*debt));
-        path.push(Token::FixedBytes(pool_fee_encoded.clone()));
-
-        // If neither the collateral or debt is WETH then we want to introduce an intermediate swap through WETH
-        if collateral.ne(&weth_address) && debt.ne(&weth_address) {
-            path.push(Token::Address(weth_address));
+        // If debt is USDXL, we're using flash minter route
+        if debt.eq(&usdxl_address) {
+            // We want to swap collateral to USDXL
+            path.push(Token::Address(*collateral));
             path.push(Token::FixedBytes(pool_fee_encoded.clone()));
-        }
+            path.push(Token::Bool(true)); // stable pool
+            path.push(Token::Address(usdxl_address));
+        } else {
+            // We first want to swap for debt
+            path.push(Token::Address(*debt));
+            path.push(Token::FixedBytes(pool_fee_encoded.clone()));
+            path.push(Token::Bool(true)); // stable pool
 
-        // Finally we want to use obtained collateral to pay the flash swap back
-        path.push(Token::Address(*collateral));
+            // If neither the collateral or debt is WETH then we want to introduce an intermediate swap through WETH
+            if collateral.ne(&weth_address) && debt.ne(&weth_address) {
+                path.push(Token::Address(weth_address));
+                path.push(Token::FixedBytes(pool_fee_encoded.clone()));
+                path.push(Token::Bool(true)); // stable pool
+            }
+
+            // Finally we want to use obtained collateral to pay the flash swap back
+            path.push(Token::Address(*collateral));
+        }
 
         debug!("get_swap_path {:?}", path);
 
         let encoded_swap_path = encode_packed(&path)?;
 
-        Ok(Bytes::from(encoded_swap_path))
+        // Check for override first, otherwise use default logic
+        let swap_venue = if debt.eq(&usdxl_address) {
+            "usdxlFlashMinter".to_string()
+        } else if let Some(default_liq_path) = &self.config.default_liq_path {
+            default_liq_path.clone()
+        } else {
+            "kittenswap".to_string()
+        };
+
+        Ok((Bytes::from(encoded_swap_path), swap_venue))
     }
 
     async fn get_pool_state(&self) -> Result<PoolState> {
@@ -737,7 +758,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
             profit_eth: I256::from(0),
         };
 
-        let gain = self.build_liquidation_call(&op).await?.call().await?;
+        let (_, gain) = self.build_liquidation_call(&op).await?.call().await?;
 
         let weth_price = self
             .get_asset_price_eth(collateral_address, pool_state)
@@ -755,7 +776,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
     async fn build_liquidation_call(
         &self,
         op: &LiquidationOpportunity,
-    ) -> Result<ContractCall<M, I256>> {
+    ) -> Result<ContractCall<M, (Address, I256)>> {
         info!(
             "Build - borrower: {:?}, collateral: {:?}, debt: {:?}, debt_to_cover: {:?}, profit_eth: {:?}",
             op.borrower, op.collateral, op.debt, op.debt_to_cover, op.profit_eth
@@ -763,9 +784,10 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
 
         let liquidator = Liquidator::new(self.liquidator, self.write_client.clone());
 
-        let swap_path = self.get_swap_path(&op.collateral, &op.debt)?;
+        let (swap_path, swap_venue) = self.get_swap_path(&op.collateral, &op.debt)?;
 
         info!("swap path: {:?}", swap_path);
+        info!("swap venue: {:?}", swap_venue);
 
         info!("collateral to liquidate: {:?}", op.collateral_to_liquidate);
 
@@ -775,7 +797,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
             op.borrower,
             op.debt_to_cover,
             Bytes::from(swap_path),
-            self.config.swap_venue.clone(),
+            swap_venue,
         );
 
         debug!("Liquidation op contract call: {:?}", contract_call);
