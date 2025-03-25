@@ -97,8 +97,9 @@ pub struct StateCache {
     borrowers: HashMap<Address, Borrower>,
 }
 
-struct PoolState {
-    prices: HashMap<Address, U256>,
+#[derive(Debug)]
+pub struct PoolState {
+    pub prices: HashMap<Address, U256>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -134,6 +135,7 @@ pub struct AaveStrategy<M> {
     chain_id: u64,
     config: DeploymentConfig,
     liquidator: Address,
+    pool_state: PoolState,
 }
 
 impl<M: Middleware + 'static> AaveStrategy<M> {
@@ -154,6 +156,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
             chain_id: config.chain_id,
             config: get_deployment_config(deployment),
             liquidator: Address::from_str(&liquidator_address).expect("invalid liquidator address"),
+            pool_state: PoolState { prices: HashMap::new() },
         }
     }
 }
@@ -617,45 +620,54 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
         let usdxl_address = self.config.usdxl_address;
         let whype_address = self.config.whype_address;
 
-        let pool_fee: u32 = 3000;
-        let pool_fee_encoded = pool_fee.to_be_bytes()[1..].to_vec(); // convert to uint24 by taking last 3 bytes only
         let mut path: Vec<Token> = Vec::new();
-
-        // If debt is USDXL, we're using flash minter route
-        if debt.eq(&usdxl_address) {
-            // We want to swap collateral to USDXL
-            path.push(Token::Address(*collateral));
-            path.push(Token::FixedBytes(pool_fee_encoded.clone()));
-            path.push(Token::Bool(true)); // stable pool
-            path.push(Token::Address(usdxl_address));
-        } else {
-            // We first want to swap for debt
-            path.push(Token::Address(*debt));
-            path.push(Token::FixedBytes(pool_fee_encoded.clone()));
-            path.push(Token::Bool(true)); // stable pool
-
-            // If neither the collateral or debt is WETH then we want to introduce an intermediate swap through WETH
-            if collateral.ne(&whype_address) && debt.ne(&whype_address) {
-                path.push(Token::Address(whype_address));
-                path.push(Token::FixedBytes(pool_fee_encoded.clone()));
-                path.push(Token::Bool(true)); // stable pool
-            }
-
-            // Finally we want to use obtained collateral to pay the flash swap back
-            path.push(Token::Address(*collateral));
-        }
-
-        debug!("get_swap_path {:?}", path);
-
-        let encoded_swap_path = encode_packed(&path)?;
-
-        // Check for override first, otherwise use default logic
+        
+        // Determine the venue and if it's an exact output swap
         let liq_path = if debt.eq(&usdxl_address) {
             "usdxlFlashMinter".to_string()
         } else {
             self.config.default_liq_path.clone()
         };
 
+        let is_kittenswap = liq_path == "kittenswap";
+        let exact_out = liq_path == "kittenswap" || liq_path == "hyperswap";
+
+        let (start_token, end_token) = if exact_out {
+            (debt, collateral)
+        } else {
+            (collateral, debt)
+        };
+
+        // Build path
+        path.push(Token::Address(*start_token));
+
+        // If neither token is WETH, route through it
+        if collateral.ne(&whype_address) && debt.ne(&whype_address) {
+            if !is_kittenswap {
+                path.push(Token::FixedBytes(3000u32.to_be_bytes()[1..].to_vec()));
+            }
+            path.push(Token::Bool(Self::is_stable(
+                &self.pool_state,
+                if exact_out { &whype_address } else { start_token },
+                if exact_out { start_token } else { &whype_address }
+            )?));
+            path.push(Token::Address(whype_address));
+        }
+
+        // Add final token
+        if !is_kittenswap {
+            path.push(Token::FixedBytes(3000u32.to_be_bytes()[1..].to_vec()));
+        }
+        path.push(Token::Bool(Self::is_stable(
+            &self.pool_state,
+            if path.len() > 1 { &whype_address } else { start_token },
+            end_token
+        )?));
+        path.push(Token::Address(*end_token));
+
+        debug!("get_liq_path {:?}", path);
+
+        let encoded_swap_path = encode_packed(&path)?;
         Ok((Bytes::from(encoded_swap_path), liq_path))
     }
 
@@ -811,6 +823,38 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
             token, amount, balance
         );
         Ok(balance >= amount)
+    }
+
+    /// Determines if a trading pair should be considered stable based on pool state prices
+    /// Returns true if the prices are within 10% of each other
+    fn is_stable(pool_state: &PoolState, token_a: &Address, token_b: &Address) -> Result<bool> {
+        // Get prices from pool state
+        let price_a = pool_state
+            .prices
+            .get(token_a)
+            .ok_or_else(|| anyhow!("No price found for token {}", token_a))?;
+        
+        let price_b = pool_state
+            .prices
+            .get(token_b)
+            .ok_or_else(|| anyhow!("No price found for token {}", token_b))?;
+
+        // Ensure we don't divide by zero
+        if price_b.is_zero() {
+            return Ok(false);
+        }
+
+        // Convert U256 to f64 via u128
+        let ratio = (price_a.as_u128() as f64) / (price_b.as_u128() as f64);
+
+        debug!(
+            "Stability check for {:?} and {:?}: price_a={}, price_b={}, ratio={}",
+            token_a, token_b, price_a, price_b, ratio
+        );
+
+        // Check if prices are within 10% of each other
+        // ratio should be between 0.9 and 1.1
+        Ok(ratio >= 0.9 && ratio <= 1.1)
     }
 }
 
