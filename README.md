@@ -16,6 +16,12 @@ forge install
 forge create ./src/Liquidator.sol:Liquidator --private-key <xyz> --rpc-url <xyz> --broadcast
 ```
 
+```
+Deployer: 0x1B7a7d51eE86e1d9776986AEFD2675312CF0C9Da
+Deployed to: 0xc2daE68CFAaf75C199D7c259FC7845c99af75f88
+Transaction hash: 0x9acdfc221d17945bd7fe7313e65e535f35f6f627e5e752f1ac6211119ab2084c
+```
+
 for mainnet verification:
 ```bash
 forge create ./src/Liquidator.sol:Liquidator --private-key <xyz> --rpc-url <xyz> --broadcast --verify --verifier sourcify --verifier-url https://sourcify.parsec.finance/verify

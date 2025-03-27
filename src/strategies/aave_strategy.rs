@@ -84,7 +84,7 @@ fn get_deployment_config(deployment: Deployment) -> DeploymentConfig {
             multicall3_address: Address::from_str("0xA66AEb1c0A579Ad95bA3940d18FAad02C368A383").unwrap(),
             liq_paths_config_file: "liq_paths.json".to_string(),
             default_liq_path: "kittenswap".to_string(),
-            creation_block: 82245,
+            creation_block: 787547,
         },
     }
 }
