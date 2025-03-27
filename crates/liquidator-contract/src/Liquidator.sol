@@ -14,14 +14,12 @@ import {IKittenPairFactory} from "./interfaces/IKittenPairFactory.sol";
 import {KittenswapLib} from "./lib/KittenswapLib.sol";
 import {IKittenswapSwapCallback} from "./interfaces/IKittenswapSwapCallback.sol";
 import {IERC20} from "./interfaces/IERC20.sol";
-import {IUsdxlFlashMinter} from "./interfaces/IUsdxlFlashMinter.sol";
-import {IERC3156FlashBorrower} from "./interfaces/IERC3156FlashBorrower.sol";
 
 uint160 constant MIN_SQRT_RATIO = 4295128739;
 /// @dev The maximum value that can be returned from #getSqrtRatioAtTick. Equivalent to getSqrtRatioAtTick(MAX_TICK)
 uint160 constant MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342;
 
-contract Liquidator is Owned(msg.sender), IKittenswapSwapCallback, IUniswapV3SwapCallback, IERC3156FlashBorrower {
+contract Liquidator is Owned(msg.sender), IKittenswapSwapCallback, IUniswapV3SwapCallback {
     event LiquidatorSet(address indexed liquidator, bool enabled);
 
     struct SwapCallbackData {
@@ -35,12 +33,8 @@ contract Liquidator is Owned(msg.sender), IKittenswapSwapCallback, IUniswapV3Swa
         bool swapOut;
     }
 
-    // hypurrfi
-    IPool public constant pool = IPool(0xceCcE0EB9DD2Ef7996e01e25DD70e461F918A14b);
-
-    // usdxl
-    IERC20 public constant USDXL = IERC20(0xca79db4B49f608eF54a5CB813FbEd3a6387bC645);
-    IUsdxlFlashMinter public constant FLASH_MINTER = IUsdxlFlashMinter(0xD12f1c402197224339D5A324AC7ef4DF5d2142E9);
+    // hyperlend
+    IPool public constant pool = IPool(0x00A89d7a5A02160f20150EbEA7a2b5E4879A1A8b);
 
     // hyperswap
     address public constant hyperswapV3Factory = 0xB1c0fa0B789320044A6F623cFe5eBda9562602E3;
@@ -145,30 +139,6 @@ contract Liquidator is Owned(msg.sender), IKittenswapSwapCallback, IUniswapV3Swa
 
             // calculate final gain
             finalGain = int256(ERC20(collateralAsset).balanceOf(address(this))) - finalGain;
-        } else if (keccak256(abi.encodePacked(liqPath)) == keccak256(abi.encodePacked("usdxlFlashMinter"))) {
-            // swap ends with debt asset (USDXL)
-            finalToken = debtAsset;
-
-            // get balance before flash loan
-            finalGain = int256(ERC20(debtAsset).balanceOf(address(this)));
-
-            // execute flash loan, liquidate, and swap to USDXL
-            _flashLoanUsdxl(
-                debtToCover,
-                SwapCallbackData({
-                    path: swapPath,
-                    collateralAsset: collateralAsset,
-                    debtAsset: debtAsset,
-                    user: user,
-                    debtToCover: debtToCover,
-                    amountToPay: 0,
-                    liquidateUser: false,
-                    swapOut: false
-                })
-            );
-
-            // calculate final gain
-            finalGain = int256(ERC20(debtAsset).balanceOf(address(this))) - finalGain;
         } else {
             revert("Invalid liquidation path");
         }
@@ -351,71 +321,6 @@ contract Liquidator is Owned(msg.sender), IKittenswapSwapCallback, IUniswapV3Swa
         tokenIn = tokenOut; // swap in/out because exact output swaps are reversed
 
         ERC20(tokenIn).transfer(msg.sender, amountToPay);
-    }
-
-    /**
-     * @notice Initiates a flash loan
-     * @param debtToCover The amount of USDXL debt to cover
-     * @param data Additional data passed to the flash loan
-     */
-    function _flashLoanUsdxl(uint256 debtToCover, SwapCallbackData memory data) internal {
-        FLASH_MINTER.flashLoan(IERC3156FlashBorrower(address(this)), address(USDXL), debtToCover, abi.encode(data));
-    }
-
-    struct ExecuteOperationLocals {
-        uint256 amountToRepay;
-        uint256 collateralGained;
-        SwapCallbackData data;
-    }
-
-    bytes32 public constant CALLBACK_SUCCESS = keccak256('ERC3156FlashBorrower.onFlashLoan');
-
-    /**
-     * @notice Callback function called by the flash minter
-     * @param initiator The address that initiated the flash loan
-     * @param amount The amount of USDXL borrowed
-     * @param fee The fee to be paid for the flash loan
-     * @param data Additional data passed to the flash loan
-     * @return success The keccak256 hash of "IERC3156FlashBorrower.onFlashLoan"
-     */
-    function onFlashLoan(address initiator, address token, uint256 amount, uint256 fee, bytes calldata data) external returns (bytes32 success) {
-        // Ensure caller is the flash minter
-        require(initiator == address(this), "Initiator of onFlashLoan() must be liquidator contract");
-        require(msg.sender == address(FLASH_MINTER), "Msg.sender of onFlashLoan() must be usdxlFlashMinter");
-        require(token == address(USDXL), "Flash loaned token must be USDXL");
-
-        // Verify we received the flash loaned amount
-        require(USDXL.balanceOf(address(this)) >= amount, "Invalid balance for flash loan");
-
-        ExecuteOperationLocals memory locals;
-
-        locals.data = abi.decode(data, (SwapCallbackData));
-
-        require(locals.data.debtAsset == address(USDXL), "Debt asset must be USDXL");
-
-        // Calculate total amount to repay (loan + fee)
-        locals.amountToRepay = amount + fee;
-
-        locals.collateralGained = ERC20(locals.data.collateralAsset).balanceOf(address(this));
-
-        // liquidate user to receive collateral
-        pool.liquidationCall(
-            locals.data.collateralAsset,
-            locals.data.debtAsset,
-            locals.data.user,
-            locals.data.debtToCover,
-            false // receiveAToken is false so we can repay the swap
-        );
-
-        locals.collateralGained = ERC20(locals.data.collateralAsset).balanceOf(address(this)) - locals.collateralGained;
-
-        // swap all collateral to USDXL
-        _swapInKittenswap(locals.collateralGained, locals.data);
-
-        // Approve flash minter to pull repayment
-        USDXL.approve(address(FLASH_MINTER), locals.amountToRepay);
-
-        return CALLBACK_SUCCESS;
     }
 
     /// @notice Approve max ERC-20 allowance to Aave pool to save gas and not have to approve every liquidation
