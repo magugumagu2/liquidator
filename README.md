@@ -18,8 +18,8 @@ forge create ./src/Liquidator.sol:Liquidator --private-key <xyz> --rpc-url <xyz>
 
 ```
 Deployer: 0x1B7a7d51eE86e1d9776986AEFD2675312CF0C9Da
-Deployed to: 0xc2daE68CFAaf75C199D7c259FC7845c99af75f88
-Transaction hash: 0x9acdfc221d17945bd7fe7313e65e535f35f6f627e5e752f1ac6211119ab2084c
+Deployed to: 0x01141a2b3fd032Fb233043dE1225A64eC74e1cE0
+Transaction hash: 0xacc52bb30639f5529e1491d7879847a36e5a6ccfe938cc818c08ffc34fce40c8
 ```
 
 for mainnet verification:
