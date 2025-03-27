@@ -611,7 +611,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
         let mut path: Vec<Token> = Vec::new();
         
         // Determine the venue and if it's an exact output swap
-        let liq_path = self.config.default_liq_path.clone()
+        let liq_path = self.config.default_liq_path.clone();
 
         let is_kittenswap = liq_path == "kittenswap";
         let exact_out = liq_path == "kittenswap" || liq_path == "hyperswap";
