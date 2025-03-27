@@ -21,10 +21,6 @@ for mainnet verification:
 forge create ./src/Liquidator.sol:Liquidator --private-key <xyz> --rpc-url <xyz> --broadcast --verify --verifier sourcify --verifier-url https://sourcify.parsec.finance/verify
 ```
 
-Deployer: 0x096f03ae4c33E9C9C0EC0dcbA29645382c38896b
-Deployed to: 0x01cd51e5ed59a2C57AC2339Bac905C2F694C2C19
-Transaction hash: 0x9708c1b67948fb7928dca5cb533a8e75a4790a3204480818fa34f6a5542effe6
-
 4. Build Rust Application
 
 a. cd to root of project
@@ -53,7 +49,7 @@ d. Copy (scp) binary to liquidator host
     --write-rpc <xyz> \
     --private-key <xyz> \
     --bid-percentage 100 \
-    --deployment hyfi \
+    --deployment hyperlend \
     --liquidator-address <xyz> \
     --chain-id <xyz>
 ```

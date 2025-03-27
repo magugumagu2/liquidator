@@ -42,7 +42,6 @@ struct DeploymentConfig {
     oracle_address: Address,
     whype_address: Address,
     multicall3_address: Address,
-    usdxl_address: Address,
     liq_paths_config_file: String,
     default_liq_path: String,
     creation_block: u64,
@@ -51,7 +50,7 @@ struct DeploymentConfig {
 #[derive(Debug, Clone, Parser, ValueEnum)]
 pub enum Deployment {
     MOCKNET,
-    HYFI,
+    HYPERLEND,
 }
 
 pub const LIQUIDATION_CLOSE_FACTOR_THRESHOLD: &str = "950000000000000000";
@@ -72,19 +71,17 @@ fn get_deployment_config(deployment: Deployment) -> DeploymentConfig {
             oracle_address: Address::from_str("0x0E801D84Fa97b50751Dbf25036d067dCf18858bF").unwrap(),
             whype_address: Address::from_str("0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0").unwrap(),
             multicall3_address: Address::from_str("0x720472c8ce72c2A2D711333e064ABD3E6BbEAdd3").unwrap(),
-            usdxl_address: Address::from_str("0xca79db4B49f608eF54a5CB813FbEd3a6387bC645").unwrap(),
             liq_paths_config_file: "liq_paths.json".to_string(),
             default_liq_path: "hyperswap".to_string(),
             creation_block: 0,
         },
-        Deployment::HYFI => DeploymentConfig {
+        Deployment::HYPERLEND => DeploymentConfig {
             state_cache_file: "borrowers-hyperevm-mainnet.json".to_string(),
-            pool_address: Address::from_str("0xceCcE0EB9DD2Ef7996e01e25DD70e461F918A14b").unwrap(),
-            pool_data_provider: Address::from_str("0x895C799a5bbdCb63B80bEE5BD94E7b9138D977d6").unwrap(),
-            oracle_address: Address::from_str("0x9BE2ac1ff80950DCeb816842834930887249d9A8").unwrap(),
+            pool_address: Address::from_str("0x00A89d7a5A02160f20150EbEA7a2b5E4879A1A8b").unwrap(),
+            pool_data_provider: Address::from_str("0x5481bf8d3946E6A3168640c1D7523eB59F055a29").unwrap(),
+            oracle_address: Address::from_str("0xC9Fb4fbE842d57EAc1dF3e641a281827493A630e").unwrap(),
             whype_address: Address::from_str("0x5555555555555555555555555555555555555555").unwrap(),
             multicall3_address: Address::from_str("0xA66AEb1c0A579Ad95bA3940d18FAad02C368A383").unwrap(),
-            usdxl_address: Address::from_str("0xca79db4B49f608eF54a5CB813FbEd3a6387bC645").unwrap(),
             liq_paths_config_file: "liq_paths.json".to_string(),
             default_liq_path: "kittenswap".to_string(),
             creation_block: 82245,
@@ -609,17 +606,12 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
         info!("no liq config found for {:?} and {:?}", collateral, debt);
 
         // Fall back to default logic if no config file or no path found
-        let usdxl_address = self.config.usdxl_address;
         let whype_address = self.config.whype_address;
 
         let mut path: Vec<Token> = Vec::new();
         
         // Determine the venue and if it's an exact output swap
-        let liq_path = if debt.eq(&usdxl_address) {
-            "usdxlFlashMinter".to_string()
-        } else {
-            self.config.default_liq_path.clone()
-        };
+        let liq_path = self.config.default_liq_path.clone()
 
         let is_kittenswap = liq_path == "kittenswap";
         let exact_out = liq_path == "kittenswap" || liq_path == "hyperswap";
