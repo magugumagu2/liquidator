@@ -1,21 +1,111 @@
 [
-        {
-            "collateral": "0x94e8396e0869c9f2200760af0621afd240e1cf38",
-            "debt": "0x5555555555555555555555555555555555555555",
+  {
+    "collateral": "0x94e8396e0869c9f2200760af0621afd240e1cf38",
+    "debt": "0x5555555555555555555555555555555555555555",
+    "pair": "wstHYPE-WHYPE",
+    "liq_paths": [
+      {
+        "liq_path": "kittenswap",
+        "swap_path": [
+          {
+            "swap_venue": "kittenswap",
             "pair": "wstHYPE-WHYPE",
-            "liq_paths": [
-                {
-                    "liq_path": "kittenswap",
-                    "swap_path": [
-                        {
-                            "swap_venue": "kittenswap",
-                            "pair": "wstHYPE-WHYPE",
-                            "token_in": "0x94e8396e0869c9f2200760af0621afd240e1cf38",
-                            "token_out": "0x5555555555555555555555555555555555555555",
-                            "stable": true
-                        }
-                    ]
-                }
-            ]
-        }
+            "token_in": "0x94e8396e0869c9f2200760af0621afd240e1cf38",
+            "token_out": "0x5555555555555555555555555555555555555555",
+            "stable": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "collateral": "0x9FDBdA0A5e284c32744D2f17Ee5c74B284993463",
+    "debt": "0x5555555555555555555555555555555555555555",
+    "pair": "UBTC-WHYPE",
+    "liq_paths": [
+      {
+        "liq_path": "kittenswap",
+        "swap_path": [
+          {
+            "swap_venue": "kittenswap",
+            "pair": "UBTC-WHYPE",
+            "token_in": "0x9FDBdA0A5e284c32744D2f17Ee5c74B284993463",
+            "token_out": "0x5555555555555555555555555555555555555555",
+            "stable": false
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "collateral": "0x5555555555555555555555555555555555555555",
+    "debt": "0x9FDBdA0A5e284c32744D2f17Ee5c74B284993463",
+    "pair": "WHYPE-UBTC",
+    "liq_paths": [
+      {
+        "liq_path": "kittenswap",
+        "swap_path": [
+          {
+            "swap_venue": "kittenswap",
+            "pair": "WHYPE-UBTC",
+            "token_in": "0x5555555555555555555555555555555555555555",
+            "token_out": "0x9FDBdA0A5e284c32744D2f17Ee5c74B284993463",
+            "stable": false
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "collateral": "0x9FDBdA0A5e284c32744D2f17Ee5c74B284993463",
+    "debt": "0x94e8396e0869c9F2200760aF0621aFd240E1CF38",
+    "pair": "UBTC-wstHYPE",
+    "liq_paths": [
+      {
+        "liq_path": "kittenswap",
+        "swap_path": [
+          {
+            "swap_venue": "kittenswap",
+            "pair": "UBTC-WHYPE",
+            "token_in": "0x9FDBdA0A5e284c32744D2f17Ee5c74B284993463",
+            "token_out": "0x5555555555555555555555555555555555555555",
+            "stable": false
+          },
+          {
+            "swap_venue": "kittenswap",
+            "pair": "wHYPE-wsHYPE",
+            "token_in": "0x5555555555555555555555555555555555555555",
+            "token_out": "0x94e8396e0869c9F2200760aF0621aFd240E1CF38",
+            "stable": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "collateral": "0x94e8396e0869c9F2200760aF0621aFd240E1CF38",
+    "debt": "0x9FDBdA0A5e284c32744D2f17Ee5c74B284993463",
+    "pair": "wstHYPE-UBTC",
+    "liq_paths": [
+      {
+        "liq_path": "kittenswap",
+        "swap_path": [
+          {
+            "swap_venue": "kittenswap",
+            "pair": "wstHYPE-HYPE",
+            "token_in": "0x94e8396e0869c9F2200760aF0621aFd240E1CF38",
+            "token_out": "0x5555555555555555555555555555555555555555",
+            "stable": true
+          },
+          {
+            "swap_venue": "kittenswap",
+            "pair": "wHYPE-UBTC",
+            "token_in": "0x5555555555555555555555555555555555555555",
+            "token_out": "0x9FDBdA0A5e284c32744D2f17Ee5c74B284993463",
+            "stable": false
+          }
+        ]
+      }
+    ]
+  }
 ]
