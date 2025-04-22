@@ -107,5 +107,147 @@
         ]
       }
     ]
+  },
+  {
+    "collateral": "0xBe6727B535545C67d5cAa73dEa54865B92CF7907",
+    "debt": "0x5555555555555555555555555555555555555555",
+    "pair": "UETH-WHYPE",
+    "liq_paths": [
+      {
+        "liq_path": "kittenswap",
+        "swap_path": [
+          {
+            "swap_venue": "kittenswap",
+            "pair": "UETH-WHYPE",
+            "token_in": "0xBe6727B535545C67d5cAa73dEa54865B92CF7907",
+            "token_out": "0x5555555555555555555555555555555555555555",
+            "stable": false
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "collateral": "0x5555555555555555555555555555555555555555",
+    "debt": "0xBe6727B535545C67d5cAa73dEa54865B92CF7907",
+    "pair": "WHYPE-UETH",
+    "liq_paths": [
+      {
+        "liq_path": "kittenswap",
+        "swap_path": [
+          {
+            "swap_venue": "kittenswap",
+            "pair": "UETH-WHYPE",
+            "token_in": "0x5555555555555555555555555555555555555555",
+            "token_out": "0xBe6727B535545C67d5cAa73dEa54865B92CF7907",
+            "stable": false
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "collateral": "0xBe6727B535545C67d5cAa73dEa54865B92CF7907",
+    "debt": "0x9FDBdA0A5e284c32744D2f17Ee5c74B284993463",
+    "pair": "UETH-UBTC",
+    "liq_paths": [
+      {
+        "liq_path": "kittenswap",
+        "swap_path": [
+          {
+            "swap_venue": "kittenswap",
+            "pair": "UETH-WHYPE",
+            "token_in": "0xBe6727B535545C67d5cAa73dEa54865B92CF7907",
+            "token_out": "0x5555555555555555555555555555555555555555",
+            "stable": false
+          },
+          {
+            "swap_venue": "kittenswap",
+            "pair": "WHYPE-UBTC",
+            "token_in": "0x5555555555555555555555555555555555555555",
+            "token_out": "0x9FDBdA0A5e284c32744D2f17Ee5c74B284993463",
+            "stable": false
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "collateral": "0x9FDBdA0A5e284c32744D2f17Ee5c74B284993463",
+    "debt": "0xBe6727B535545C67d5cAa73dEa54865B92CF7907",
+    "pair": "UBTC-UETH",
+    "liq_paths": [
+      {
+        "liq_path": "kittenswap",
+        "swap_path": [
+          {
+            "swap_venue": "kittenswap",
+            "pair": "UBTC-WHYPE",
+            "token_in": "0x9FDBdA0A5e284c32744D2f17Ee5c74B284993463",
+            "token_out": "0x5555555555555555555555555555555555555555",
+            "stable": false
+          },
+          {
+            "swap_venue": "kittenswap",
+            "pair": "UETH-WHYPE",
+            "token_in": "0x5555555555555555555555555555555555555555",
+            "token_out": "0xBe6727B535545C67d5cAa73dEa54865B92CF7907",
+            "stable": false
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "collateral": "0xBe6727B535545C67d5cAa73dEa54865B92CF7907",
+    "debt": "0x94e8396e0869c9F2200760aF0621aFd240E1CF38",
+    "pair": "UETH-wstHYPE",
+    "liq_paths": [
+      {
+        "liq_path": "kittenswap",
+        "swap_path": [
+          {
+            "swap_venue": "kittenswap",
+            "pair": "UETH-WHYPE",
+            "token_in": "0xBe6727B535545C67d5cAa73dEa54865B92CF7907",
+            "token_out": "0x5555555555555555555555555555555555555555",
+            "stable": false
+          },
+          {
+            "swap_venue": "kittenswap",
+            "pair": "WHYPE-wstHYPE",
+            "token_in": "0x5555555555555555555555555555555555555555",
+            "token_out": "0x94e8396e0869c9F2200760aF0621aFd240E1CF38",
+            "stable": false
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "collateral": "0x94e8396e0869c9F2200760aF0621aFd240E1CF38",
+    "debt": "0xBe6727B535545C67d5cAa73dEa54865B92CF7907",
+    "pair": "wstHYPE-UETH",
+    "liq_paths": [
+      {
+        "liq_path": "kittenswap",
+        "swap_path": [
+          {
+            "swap_venue": "kittenswap",
+            "pair": "wstHYPE-WHYPE",
+            "token_in": "0x94e8396e0869c9F2200760aF0621aFd240E1CF38",
+            "token_out": "0x5555555555555555555555555555555555555555",
+            "stable": false
+          },
+          {
+            "swap_venue": "kittenswap",
+            "pair": "WHYPE-UETH",
+            "token_in": "0x5555555555555555555555555555555555555555",
+            "token_out": "0xBe6727B535545C67d5cAa73dEa54865B92CF7907",
+            "stable": false
+          }
+        ]
+      }
+    ]
   }
 ]
