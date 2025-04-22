@@ -1,6 +1,6 @@
 # Aave V3 Liquidator
 
-This is an [Artemis](https://github.com/paradigmxyz/artemis) bot that liquidates aave v3 positions on base chain
+This is an [Artemis](https://github.com/paradigmxyz/artemis) bot that liquidates aave v3 positions
 
 # Getting Started
 
@@ -14,12 +14,6 @@ This is an [Artemis](https://github.com/paradigmxyz/artemis) bot that liquidates
 cd crates/liquidator-contract
 forge install
 forge create ./src/Liquidator.sol:Liquidator --private-key <xyz> --rpc-url <xyz> --broadcast
-```
-
-```
-Deployer: 0x1B7a7d51eE86e1d9776986AEFD2675312CF0C9Da
-Deployed to: 0x01141a2b3fd032Fb233043dE1225A64eC74e1cE0
-Transaction hash: 0xacc52bb30639f5529e1491d7879847a36e5a6ccfe938cc818c08ffc34fce40c8
 ```
 
 for mainnet verification:
@@ -59,7 +53,9 @@ d. Copy (scp) binary to liquidator host
     --liquidator-address <xyz> \
     --chain-id <xyz>
 ```
-```
+
+- Write rpc: https://rpc.hyperliquid.xzy/evm
+- Archive rpc: https://rpx.hyperlend.finance/archive
 
 
 # Re-generate Contract Bindings
