@@ -237,7 +237,7 @@
             "pair": "wstHYPE-WHYPE",
             "token_in": "0x94e8396e0869c9F2200760aF0621aFd240E1CF38",
             "token_out": "0x5555555555555555555555555555555555555555",
-            "stable": false
+            "stable": true
           },
           {
             "swap_venue": "kittenswap",
@@ -245,6 +245,131 @@
             "token_in": "0x5555555555555555555555555555555555555555",
             "token_out": "0xBe6727B535545C67d5cAa73dEa54865B92CF7907",
             "stable": false
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "collateral": "0x94e8396e0869c9F2200760aF0621aFd240E1CF38",
+    "debt": "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34",
+    "pair": "wstHYPE-USDe",
+    "liq_paths": [
+      {
+        "liq_path": "kittenswap",
+        "swap_path": [
+          {
+            "swap_venue": "kittenswap",
+            "pair": "wstHYPE-WHYPE",
+            "token_in": "0x94e8396e0869c9F2200760aF0621aFd240E1CF38",
+            "token_out": "0x5555555555555555555555555555555555555555",
+            "stable": true
+          },
+          {
+            "swap_venue": "kittenswap",
+            "pair": "WHYPE-feUSD",
+            "token_in": "0x5555555555555555555555555555555555555555",
+            "token_out": "0x02c6a2fA58cC01A18B8D9E00eA48d65E4dF26c70",
+            "stable": false
+          },
+          {
+            "swap_venue": "kittenswap",
+            "pair": "feUSD-USDe",
+            "token_in": "0x02c6a2fA58cC01A18B8D9E00eA48d65E4dF26c70",
+            "token_out": "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34",
+            "stable": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "collateral": "0x5555555555555555555555555555555555555555",
+    "debt": "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34",
+    "pair": "wHYPE-USDe",
+    "liq_paths": [
+      {
+        "liq_path": "kittenswap",
+        "swap_path": [
+          {
+            "swap_venue": "kittenswap",
+            "pair": "wHYPE-feUSD",
+            "token_in": "0x5555555555555555555555555555555555555555",
+            "token_out": "0x02c6a2fA58cC01A18B8D9E00eA48d65E4dF26c70",
+            "stable": false
+          },
+          {
+            "swap_venue": "kittenswap",
+            "pair": "feUSD-USDe",
+            "token_in": "0x02c6a2fA58cC01A18B8D9E00eA48d65E4dF26c70",
+            "token_out": "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34",
+            "stable": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "collateral": "0x9FDBdA0A5e284c32744D2f17Ee5c74B284993463",
+    "debt": "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34",
+    "pair": "UBTC-USDe",
+    "liq_paths": [
+      {
+        "liq_path": "kittenswap",
+        "swap_path": [
+          {
+            "swap_venue": "kittenswap",
+            "pair": "UBTC-WHYPE",
+            "token_in": "0x9FDBdA0A5e284c32744D2f17Ee5c74B284993463",
+            "token_out": "0x5555555555555555555555555555555555555555",
+            "stable": false
+          },
+          {
+            "swap_venue": "kittenswap",
+            "pair": "WHYPE-feUSD",
+            "token_in": "0x5555555555555555555555555555555555555555",
+            "token_out": "0x02c6a2fA58cC01A18B8D9E00eA48d65E4dF26c70",
+            "stable": false
+          },
+          {
+            "swap_venue": "kittenswap",
+            "pair": "feUSD-USDe",
+            "token_in": "0x02c6a2fA58cC01A18B8D9E00eA48d65E4dF26c70",
+            "token_out": "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34",
+            "stable": true
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "collateral": "0xBe6727B535545C67d5cAa73dEa54865B92CF7907",
+    "debt": "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34",
+    "pair": "UETH-USDe",
+    "liq_paths": [
+      {
+        "liq_path": "kittenswap",
+        "swap_path": [
+          {
+            "swap_venue": "kittenswap",
+            "pair": "UETH-WHYPE",
+            "token_in": "0xBe6727B535545C67d5cAa73dEa54865B92CF7907",
+            "token_out": "0x5555555555555555555555555555555555555555",
+            "stable": false
+          },
+          {
+            "swap_venue": "kittenswap",
+            "pair": "WHYPE-feUSD",
+            "token_in": "0x5555555555555555555555555555555555555555",
+            "token_out": "0x02c6a2fA58cC01A18B8D9E00eA48d65E4dF26c70",
+            "stable": false
+          },
+          {
+            "swap_venue": "kittenswap",
+            "pair": "feUSD-USDe",
+            "token_in": "0x02c6a2fA58cC01A18B8D9E00eA48d65E4dF26c70",
+            "token_out": "0x5d3a1Ff2b6BAb83b63cd9AD0787074081a52ef34",
+            "stable": true
           }
         ]
       }
