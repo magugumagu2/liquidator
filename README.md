@@ -2,6 +2,8 @@
 
 This is an [Artemis](https://github.com/paradigmxyz/artemis) bot that liquidates aave v3 positions
 
+Based on work by marktoda (https://github.com/marktoda/artemis-aave-v3-liquidator),  Seamless Protocol (https://github.com/seamless-protocol/liquidator) and Hypurrfi team (https://github.com/lastdotnet/hypurrfi-liquidator)
+
 # Getting Started
 
 1. Install Rust [ref](https://doc.rust-lang.org/book/ch01-01-installation.html)
