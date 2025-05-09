@@ -55,7 +55,7 @@ d. Copy (scp) binary to liquidator host
 ```
 
 - Write rpc: https://rpc.hyperliquid.xzy/evm
-- Archive rpc: https://rpx.hyperlend.finance/archive
+- Archive rpc: https://rpc.hyperlend.finance/archive
 
 
 # Re-generate Contract Bindings
