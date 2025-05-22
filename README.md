@@ -56,7 +56,7 @@ d. Copy (scp) binary to liquidator host
     --chain-id <xyz>
 ```
 
-- Write rpc: https://rpc.hyperliquid.xzy/evm
+- Write rpc: https://rpc.hyperliquid.xyz/evm
 - Archive rpc: https://rpc.hyperlend.finance/archive
 
 
