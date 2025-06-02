@@ -113,6 +113,10 @@ BUFFER_MULTIPLIER: 2x
 ```bash
 # RPC設定
 BACKUP_RPC_URL=https://rpc.hyperlend.finance/archive
+# 初回スキャン専用アーカイブRPC（大量データ取得用）
+INITIAL_SCAN_ARCHIVE_RPC_URL=https://rpc.hyperlend.finance/archive
+
+# リアルタイムRPC設定（環境に応じて自動選択）
 # REALTIME_RPC_URL=http://localhost:3001/evm  # サーバー環境
 # REALTIME_RPC_URL=http://5.104.84.211:3001/evm  # 開発環境（自動判定）
 

@@ -26,8 +26,9 @@ use std::fs::File;
 use std::io::Write;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info, warn};
+use futures::future;
 
 use super::types::{Action, Event};
 use super::integrated_approach::{IntegratedLiquidationStrategy, IntegratedStrategyConfig};
@@ -510,6 +511,8 @@ pub struct AaveStrategy<M> {
     write_client: Arc<M>,
     /// 実験的リアルタイム用クライアント (環境によって自動選択: localhost/外部IP)
     realtime_client: Option<Arc<Provider<ethers::providers::Http>>>,
+    /// 初回スキャン専用アーカイブRPCクライアント (https://rpc.hyperlend.finance/archive)
+    initial_scan_client: Option<Arc<Provider<ethers::providers::Http>>>,
     /// Amount of profits to bid in gas
     bid_percentage: u64,
     last_block_number: u64,
@@ -665,6 +668,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
             archive_client,
             write_client,
             realtime_client: None,
+            initial_scan_client: None,
             bid_percentage: config.bid_percentage,
             last_block_number: deployment_config.creation_block,
             borrowers: HashMap::new(),
@@ -1366,12 +1370,18 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
                             }
                         };
                         
-                        // 健全性係数を取得
+                        // 健全性係数を取得（実際のコントラクトから）
                         let health_factor = match integrated_strategy.get_cached_health_factor(borrower).await {
                             Ok(Some(hf)) => hf,
                             _ => {
-                                // キャッシュミスの場合はデフォルト値
-                                U256::from(1500000000000000000u64) // 1.5をデフォルト値として使用
+                                // キャッシュミスの場合は実際のコントラクトから取得
+                                match self.get_real_health_factor(*borrower).await {
+                                    Ok(real_hf) => real_hf,
+                                    Err(e) => {
+                                        warn!("借り手 {:?} のヘルスファクター取得エラー: {}。スキップ", borrower, e);
+                                        continue; // このborrowersエントリをスキップ
+                                    }
+                                }
                             }
                         };
                         
@@ -1501,8 +1511,8 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
         
         // 複数ブロックのログを並列取得
         let (borrow_logs_result, supply_logs_result) = tokio::join!(
-            self.get_range_borrow_logs(from_block, to_block),
-            self.get_range_supply_logs(from_block, to_block)
+            self.get_borrow_logs(U64::from(from_block), U64::from(to_block)),
+            self.get_supply_logs(U64::from(from_block), U64::from(to_block))
         );
         
         let borrow_logs = borrow_logs_result?;
@@ -2676,195 +2686,30 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
 
     // フォールバック用供給ログ取得（アーカイブRPC使用）
     async fn get_fallback_supply_logs(&self, block_number: u64) -> Result<Vec<SupplyFilter>> {
+        warn!("🔄 フォールバック処理中: 供給ログを取得（ブロック {}）", block_number);
+        
         let pool = Pool::<M>::new(self.config.pool_address, self.archive_client.clone());
         let filter = pool.supply_filter()
             .from_block(U64::from(block_number))
             .to_block(U64::from(block_number));
         
         match tokio::time::timeout(
-            tokio::time::Duration::from_secs(5), // フォールバックは少し長めのタイムアウト
+            Duration::from_secs(MAIN_RPC_TIMEOUT),
             filter.query()
         ).await {
             Ok(result) => {
-                match result {
-                    Ok(logs) => {
-                        if !logs.is_empty() {
-                            info!("📚 ブロック {} の供給ログ: {}件 (アーカイブRPC)", block_number, logs.len());
-                        }
-                        Ok(logs)
-                    },
-                    Err(e) => {
-                        warn!("ブロック {} の供給ログ取得エラー (アーカイブRPC): {}", block_number, e);
-                        Ok(vec![]) // エラー時は空のベクターを返す
-                    }
-                }
+                let logs = result.map_err(|e| anyhow!("フォールバック供給ログ取得エラー: {}", e))?;
+                info!("✅ フォールバック供給ログ取得成功: {}件", logs.len());
+                Ok(logs)
             },
             Err(_) => {
-                warn!("ブロック {} の供給ログ取得タイムアウト (アーカイブRPC)", block_number);
-                Ok(vec![]) // タイムアウト時も空のベクターを返す
+                error!("🚨 フォールバック供給ログ取得タイムアウト");
+                Ok(vec![])
             }
         }
     }
 
-    // 初回スキャン専用：5000ブロックずつ効率的にログを取得（アーカイブRPC使用）
-    async fn get_initial_scan_borrow_logs(&self, from_block: u64, to_block: u64) -> Result<Vec<BorrowFilter>> {
-        let mut all_logs = Vec::new();
-        let mut current_from = from_block;
-        
-        info!("📚 初回借入ログスキャン開始: ブロック {} から {} まで ({} ブロック)", 
-              from_block, to_block, to_block - from_block + 1);
-        
-        while current_from <= to_block {
-            let current_to = std::cmp::min(current_from + INITIAL_SCAN_CHUNK_SIZE - 1, to_block);
-            
-            info!("🔍 借入ログ取得中: ブロック {} から {} ({}ブロック)", 
-                  current_from, current_to, current_to - current_from + 1);
-            
-            let mut retry_count = 0;
-            let mut success = false;
-            
-            while !success && retry_count < INITIAL_SCAN_MAX_RETRIES {
-                match self.try_get_initial_borrow_logs(current_from, current_to).await {
-                    Ok(logs) => {
-                        info!("✅ 借入ログ取得成功: {}件 (ブロック {} - {})", 
-                              logs.len(), current_from, current_to);
-                        all_logs.extend(logs);
-                        success = true;
-                    },
-                    Err(e) => {
-                        retry_count += 1;
-                        if retry_count < INITIAL_SCAN_MAX_RETRIES {
-                            warn!("❌ 借入ログ取得エラー（試行 {}/{}）: {}。再試行中...", 
-                                  retry_count, INITIAL_SCAN_MAX_RETRIES, e);
-                            tokio::time::sleep(tokio::time::Duration::from_secs(2u64.pow(retry_count))).await;
-                        } else {
-                            error!("🚨 借入ログ取得に最大試行回数で失敗: {}", e);
-                            // 失敗しても次のチャンクに進む
-                        }
-                    }
-                }
-            }
-            
-            current_from = current_to + 1;
-            
-            // 短い休憩（RPCサーバーの負荷軽減）
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        }
-        
-        info!("🎉 初回借入ログスキャン完了: 合計 {} 件のログを取得", all_logs.len());
-        Ok(all_logs)
-    }
-
-    // 初回スキャン専用：5000ブロックずつ効率的に供給ログを取得（アーカイブRPC使用）
-    async fn get_initial_scan_supply_logs(&self, from_block: u64, to_block: u64) -> Result<Vec<SupplyFilter>> {
-        let mut all_logs = Vec::new();
-        let mut current_from = from_block;
-        
-        info!("📚 初回供給ログスキャン開始: ブロック {} から {} まで ({} ブロック)", 
-              from_block, to_block, to_block - from_block + 1);
-        
-        while current_from <= to_block {
-            let current_to = std::cmp::min(current_from + INITIAL_SCAN_CHUNK_SIZE - 1, to_block);
-            
-            info!("🔍 供給ログ取得中: ブロック {} から {} ({}ブロック)", 
-                  current_from, current_to, current_to - current_from + 1);
-            
-            let mut retry_count = 0;
-            let mut success = false;
-            
-            while !success && retry_count < INITIAL_SCAN_MAX_RETRIES {
-                match self.try_get_initial_supply_logs(current_from, current_to).await {
-                    Ok(logs) => {
-                        info!("✅ 供給ログ取得成功: {}件 (ブロック {} - {})", 
-                              logs.len(), current_from, current_to);
-                        all_logs.extend(logs);
-                        success = true;
-                    },
-                    Err(e) => {
-                        retry_count += 1;
-                        if retry_count < INITIAL_SCAN_MAX_RETRIES {
-                            warn!("❌ 供給ログ取得エラー（試行 {}/{}）: {}。再試行中...", 
-                                  retry_count, INITIAL_SCAN_MAX_RETRIES, e);
-                            tokio::time::sleep(tokio::time::Duration::from_secs(2u64.pow(retry_count))).await;
-                        } else {
-                            error!("🚨 供給ログ取得に最大試行回数で失敗: {}", e);
-                            // 失敗しても次のチャンクに進む
-                        }
-                    }
-                }
-            }
-            
-            current_from = current_to + 1;
-            
-            // 短い休憩（RPCサーバーの負荷軽減）
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        }
-        
-        info!("🎉 初回供給ログスキャン完了: 合計 {} 件のログを取得", all_logs.len());
-        Ok(all_logs)
-    }
-
-    // 初回スキャン専用：借入ログ取得の実際の処理（アーカイブRPC）
-    async fn try_get_initial_borrow_logs(&self, from_block: u64, to_block: u64) -> Result<Vec<BorrowFilter>> {
-        let pool = Pool::<M>::new(self.config.pool_address, self.archive_client.clone());
-        let filter = pool.borrow_filter()
-            .from_block(U64::from(from_block))
-            .to_block(U64::from(to_block));
-        
-        match tokio::time::timeout(
-            tokio::time::Duration::from_secs(INITIAL_SCAN_TIMEOUT),
-            filter.query()
-        ).await {
-            Ok(result) => result.map_err(|e| anyhow!("借入ログ取得エラー: {}", e)),
-            Err(_) => Err(anyhow!("借入ログ取得タイムアウト")),
-        }
-    }
-
-    // 初回スキャン専用：供給ログ取得の実際の処理（アーカイブRPC）
-    async fn try_get_initial_supply_logs(&self, from_block: u64, to_block: u64) -> Result<Vec<SupplyFilter>> {
-        let pool = Pool::<M>::new(self.config.pool_address, self.archive_client.clone());
-        let filter = pool.supply_filter()
-            .from_block(U64::from(from_block))
-            .to_block(U64::from(to_block));
-        
-        match tokio::time::timeout(
-            tokio::time::Duration::from_secs(INITIAL_SCAN_TIMEOUT),
-            filter.query()
-        ).await {
-            Ok(result) => result.map_err(|e| anyhow!("供給ログ取得エラー: {}", e)),
-            Err(_) => Err(anyhow!("供給ログ取得タイムアウト")),
-        }
-    }
-
-    // 🆕 リアルタイムスキャン用: 範囲指定で借入ログを取得
-    async fn get_range_borrow_logs(&self, from_block: u64, to_block: u64) -> Result<Vec<BorrowFilter>> {
-        let block_count = to_block - from_block + 1;
-        
-        // ブロック数に応じて処理方法を変更
-        if block_count <= 10 {
-            // 少数ブロックの場合はリアルタイムRPCを使用
-            self.get_range_borrow_logs_realtime_rpc(from_block, to_block).await
-        } else {
-            // 多数ブロックの場合はアーカイブRPCを使用
-            self.get_range_borrow_logs_archive_rpc(from_block, to_block).await
-        }
-    }
-
-    // 🆕 リアルタイムスキャン用: 範囲指定で供給ログを取得
-    async fn get_range_supply_logs(&self, from_block: u64, to_block: u64) -> Result<Vec<SupplyFilter>> {
-        let block_count = to_block - from_block + 1;
-        
-        // ブロック数に応じて処理方法を変更
-        if block_count <= 10 {
-            // 少数ブロックの場合はリアルタイムRPCを使用
-            self.get_range_supply_logs_realtime_rpc(from_block, to_block).await
-        } else {
-            // 多数ブロックの場合はアーカイブRPCを使用
-            self.get_range_supply_logs_archive_rpc(from_block, to_block).await
-        }
-    }
-
-    // リアルタイムRPCを使用した借入ログ取得
+    // リアルタイムRPCを優先して範囲ログを取得
     async fn get_range_borrow_logs_realtime_rpc(&self, from_block: u64, to_block: u64) -> Result<Vec<BorrowFilter>> {
         // リアルタイムクライアントが利用可能かチェック
         let client = if let Some(ref realtime_client) = self.realtime_client {
@@ -3010,6 +2855,273 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
                 Ok(vec![]) // タイムアウト時も空のベクターを返す
             }
         }
+    }
+
+    // 初回スキャン専用：5000ブロックずつ効率的に借入ログを取得（専用アーカイブRPC使用）
+    async fn get_initial_scan_borrow_logs(&self, from_block: u64, to_block: u64) -> Result<Vec<BorrowFilter>> {
+        let mut all_logs = Vec::new();
+        let mut current_from = from_block;
+        
+        info!("📚 初回借入ログスキャン開始: ブロック {} から {} まで ({} ブロック)", 
+              from_block, to_block, to_block - from_block + 1);
+        
+        while current_from <= to_block {
+            let current_to = std::cmp::min(current_from + INITIAL_SCAN_CHUNK_SIZE - 1, to_block);
+            
+            info!("🔍 借入ログ取得中: ブロック {} から {} ({}ブロック)", 
+                  current_from, current_to, current_to - current_from + 1);
+            
+            let mut retry_count = 0;
+            let mut success = false;
+            
+            while !success && retry_count < INITIAL_SCAN_MAX_RETRIES {
+                match self.try_get_initial_borrow_logs(current_from, current_to).await {
+                    Ok(logs) => {
+                        info!("✅ 借入ログ取得成功: {}件 (ブロック {} - {})", 
+                              logs.len(), current_from, current_to);
+                        all_logs.extend(logs);
+                        success = true;
+                    },
+                    Err(e) => {
+                        retry_count += 1;
+                        if retry_count < INITIAL_SCAN_MAX_RETRIES {
+                            warn!("❌ 借入ログ取得エラー（試行 {}/{}）: {}。再試行中...", 
+                                  retry_count, INITIAL_SCAN_MAX_RETRIES, e);
+                            tokio::time::sleep(tokio::time::Duration::from_secs(2u64.pow(retry_count))).await;
+                        } else {
+                            error!("🚨 借入ログ取得に最大試行回数で失敗: {}", e);
+                            // 失敗しても次のチャンクに進む
+                        }
+                    }
+                }
+            }
+            
+            current_from = current_to + 1;
+            
+            // 短い休憩（RPCサーバーの負荷軽減）
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+        
+        info!("🎉 初回借入ログスキャン完了: 合計 {} 件のログを取得", all_logs.len());
+        Ok(all_logs)
+    }
+
+    // 初回スキャン専用：5000ブロックずつ効率的に供給ログを取得（専用アーカイブRPC使用）
+    async fn get_initial_scan_supply_logs(&self, from_block: u64, to_block: u64) -> Result<Vec<SupplyFilter>> {
+        let mut all_logs = Vec::new();
+        let mut current_from = from_block;
+        
+        info!("📚 初回供給ログスキャン開始: ブロック {} から {} まで ({} ブロック)", 
+              from_block, to_block, to_block - from_block + 1);
+        
+        while current_from <= to_block {
+            let current_to = std::cmp::min(current_from + INITIAL_SCAN_CHUNK_SIZE - 1, to_block);
+            
+            info!("🔍 供給ログ取得中: ブロック {} から {} ({}ブロック)", 
+                  current_from, current_to, current_to - current_from + 1);
+            
+            let mut retry_count = 0;
+            let mut success = false;
+            
+            while !success && retry_count < INITIAL_SCAN_MAX_RETRIES {
+                match self.try_get_initial_supply_logs(current_from, current_to).await {
+                    Ok(logs) => {
+                        info!("✅ 供給ログ取得成功: {}件 (ブロック {} - {})", 
+                              logs.len(), current_from, current_to);
+                        all_logs.extend(logs);
+                        success = true;
+                    },
+                    Err(e) => {
+                        retry_count += 1;
+                        if retry_count < INITIAL_SCAN_MAX_RETRIES {
+                            warn!("❌ 供給ログ取得エラー（試行 {}/{}）: {}。再試行中...", 
+                                  retry_count, INITIAL_SCAN_MAX_RETRIES, e);
+                            tokio::time::sleep(tokio::time::Duration::from_secs(2u64.pow(retry_count))).await;
+                        } else {
+                            error!("🚨 供給ログ取得に最大試行回数で失敗: {}", e);
+                            // 失敗しても次のチャンクに進む
+                        }
+                    }
+                }
+            }
+            
+            current_from = current_to + 1;
+            
+            // 短い休憩（RPCサーバーの負荷軽減）
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+        
+        info!("🎉 初回供給ログスキャン完了: 合計 {} 件のログを取得", all_logs.len());
+        Ok(all_logs)
+    }
+
+    // 初回スキャン専用：借入ログ取得の実際の処理（専用アーカイブRPC）
+    async fn try_get_initial_borrow_logs(&self, from_block: u64, to_block: u64) -> Result<Vec<BorrowFilter>> {
+        // 初回スキャン専用クライアントが利用可能かチェック
+        if let Some(ref initial_scan_client) = self.initial_scan_client {
+            info!("📚 初回スキャン専用アーカイブRPC使用: ブロック {} - {} の借入ログ取得", from_block, to_block);
+            let pool = Pool::<Provider<ethers::providers::Http>>::new(self.config.pool_address, initial_scan_client.clone());
+            let filter = pool.borrow_filter()
+                .from_block(U64::from(from_block))
+                .to_block(U64::from(to_block));
+            
+            match tokio::time::timeout(
+                tokio::time::Duration::from_secs(INITIAL_SCAN_TIMEOUT),
+                filter.query()
+            ).await {
+                Ok(result) => {
+                    match result {
+                        Ok(logs) => {
+                            info!("✅ 専用アーカイブRPCで借入ログ取得成功: {}件", logs.len());
+                            return Ok(logs);
+                        },
+                        Err(e) => {
+                            warn!("専用アーカイブRPCで借入ログ取得エラー: {}。通常のarchive_clientにフォールバック", e);
+                        }
+                    }
+                },
+                Err(_) => {
+                    warn!("専用アーカイブRPCで借入ログ取得タイムアウト。通常のarchive_clientにフォールバック");
+                }
+            }
+        }
+        
+        // フォールバック: 通常のarchive_clientを使用
+        info!("🔄 通常のarchive_clientで借入ログ取得を試行");
+        let pool = Pool::<M>::new(self.config.pool_address, self.archive_client.clone());
+        let filter = pool.borrow_filter()
+            .from_block(U64::from(from_block))
+            .to_block(U64::from(to_block));
+        
+        match tokio::time::timeout(
+            tokio::time::Duration::from_secs(INITIAL_SCAN_TIMEOUT),
+            filter.query()
+        ).await {
+            Ok(result) => result.map_err(|e| anyhow!("借入ログ取得エラー: {}", e)),
+            Err(_) => Err(anyhow!("借入ログ取得タイムアウト")),
+        }
+    }
+
+    // 初回スキャン専用：供給ログ取得の実際の処理（専用アーカイブRPC）
+    async fn try_get_initial_supply_logs(&self, from_block: u64, to_block: u64) -> Result<Vec<SupplyFilter>> {
+        // 初回スキャン専用クライアントが利用可能かチェック
+        if let Some(ref initial_scan_client) = self.initial_scan_client {
+            info!("📚 初回スキャン専用アーカイブRPC使用: ブロック {} - {} の供給ログ取得", from_block, to_block);
+            let pool = Pool::<Provider<ethers::providers::Http>>::new(self.config.pool_address, initial_scan_client.clone());
+            let filter = pool.supply_filter()
+                .from_block(U64::from(from_block))
+                .to_block(U64::from(to_block));
+            
+            match tokio::time::timeout(
+                tokio::time::Duration::from_secs(INITIAL_SCAN_TIMEOUT),
+                filter.query()
+            ).await {
+                Ok(result) => {
+                    match result {
+                        Ok(logs) => {
+                            info!("✅ 専用アーカイブRPCで供給ログ取得成功: {}件", logs.len());
+                            return Ok(logs);
+                        },
+                        Err(e) => {
+                            warn!("専用アーカイブRPCで供給ログ取得エラー: {}。通常のarchive_clientにフォールバック", e);
+                        }
+                    }
+                },
+                Err(_) => {
+                    warn!("専用アーカイブRPCで供給ログ取得タイムアウト。通常のarchive_clientにフォールバック");
+                }
+            }
+        }
+        
+        // フォールバック: 通常のarchive_clientを使用
+        info!("🔄 通常のarchive_clientで供給ログ取得を試行");
+        let pool = Pool::<M>::new(self.config.pool_address, self.archive_client.clone());
+        let filter = pool.supply_filter()
+            .from_block(U64::from(from_block))
+            .to_block(U64::from(to_block));
+        
+        match tokio::time::timeout(
+            tokio::time::Duration::from_secs(INITIAL_SCAN_TIMEOUT),
+            filter.query()
+        ).await {
+            Ok(result) => result.map_err(|e| anyhow!("供給ログ取得エラー: {}", e)),
+            Err(_) => Err(anyhow!("供給ログ取得タイムアウト")),
+        }
+    }
+
+    // 実際のプールコントラクトからヘルスファクターを取得
+    async fn get_real_health_factor(&self, borrower: Address) -> Result<U256> {
+        use bindings_aave::pool::Pool;
+        
+        let pool = Pool::new(self.config.pool_address, self.archive_client.clone());
+        
+        match pool.get_user_account_data(borrower).call().await {
+            Ok(account_data) => {
+                // getUserAccountDataは6つの値を返す: (totalCollateralBase, totalDebtBase, availableBorrowsBase, currentLiquidationThreshold, ltv, healthFactor)
+                let health_factor = account_data.5; // 6番目の要素がhealth_factor
+                
+                // ヘルスファクターが0の場合（無限大を意味）、安全な大きな値を返す
+                if health_factor.is_zero() {
+                    // 債務がない場合は非常に大きな値（100.0に相当）を返す
+                    Ok(U256::from_dec_str("100000000000000000000").unwrap()) // 100.0 with 18 decimals
+                } else {
+                    Ok(health_factor)
+                }
+            },
+            Err(e) => {
+                // コントラクト呼び出しエラーの場合
+                Err(anyhow!("getUserAccountData呼び出しエラー: {}", e))
+            }
+        }
+    }
+
+    // バックアップ: 効率的なバッチ処理でヘルスファクターを取得
+    async fn get_health_factors_batch(&self, borrowers: &[Address]) -> Result<HashMap<Address, U256>> {
+        let mut results = HashMap::new();
+        
+        // 小さなバッチで並列処理
+        for chunk in borrowers.chunks(5) {
+            let pool_address = self.config.pool_address;
+            let archive_client = self.archive_client.clone();
+            
+            let futures: Vec<_> = chunk.iter().map(|&borrower| {
+                let pool_address = pool_address;
+                let archive_client = archive_client.clone();
+                async move {
+                    use bindings_aave::pool::Pool;
+                    let pool = Pool::new(pool_address, archive_client);
+                    
+                    match pool.get_user_account_data(borrower).call().await {
+                        Ok(account_data) => {
+                            let health_factor = if account_data.5.is_zero() {
+                                U256::from_dec_str("100000000000000000000").unwrap() // 100.0 with 18 decimals
+                            } else {
+                                account_data.5
+                            };
+                            Some((borrower, health_factor))
+                        },
+                        Err(e) => {
+                            warn!("借り手 {:?} のヘルスファクター取得エラー: {}", borrower, e);
+                            None
+                        }
+                    }
+                }
+            }).collect();
+            
+            let batch_results = futures::future::join_all(futures).await;
+            
+            for result in batch_results {
+                if let Some((borrower, health_factor)) = result {
+                    results.insert(borrower, health_factor);
+                }
+            }
+            
+            // RPCサーバーへの負荷軽減
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+        
+        info!("✅ バッチでヘルスファクター取得完了: {}件", results.len());
+        Ok(results)
     }
 }
 
@@ -3339,6 +3451,46 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
                 })
             },
             _ => None,
+        }
+    }
+
+    // 初回スキャン専用アーカイブRPCクライアントの初期化
+    pub async fn init_initial_scan_client(&mut self) -> Result<()> {
+        info!("📚 初回スキャン専用アーカイブRPCクライアントの初期化を開始");
+        
+        // 初回スキャン専用アーカイブRPCのURL
+        let archive_rpc_url = std::env::var("INITIAL_SCAN_ARCHIVE_RPC_URL")
+            .unwrap_or_else(|_| "https://rpc.hyperlend.finance/archive".to_string());
+        
+        info!("🔗 初回スキャン用アーカイブRPC設定: {}", archive_rpc_url);
+        
+        // 初回スキャン用に最適化されたHTTPクライアントを作成
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(120))  // 120秒タイムアウト（大量データ取得用）
+            .tcp_keepalive(Some(Duration::from_secs(30)))
+            .pool_max_idle_per_host(10)  // 初回スキャンなので控えめ
+            .connect_timeout(Duration::from_secs(10))
+            .pool_idle_timeout(Some(Duration::from_secs(60)))
+            .tcp_nodelay(true)
+            .build()?;
+        
+        let url = reqwest::Url::parse(&archive_rpc_url)?;
+        let http = ethers::providers::Http::new_with_client(url, client);
+        let mut provider = Provider::new(http);
+        provider.set_interval(Duration::from_millis(200)); // 200ms間隔（負荷軽減）
+        
+        // 接続テスト
+        match provider.get_block_number().await {
+            Ok(block_num) => {
+                info!("✅ 初回スキャン用アーカイブRPC接続成功: 最新ブロック {} (URL: {})", block_num, archive_rpc_url);
+                self.initial_scan_client = Some(Arc::new(provider));
+                Ok(())
+            }
+            Err(e) => {
+                warn!("❌ 初回スキャン用アーカイブRPC接続失敗 ({}): {}。通常のarchive_clientを使用", archive_rpc_url, e);
+                self.initial_scan_client = None;
+                Ok(()) // 失敗してもエラーにしない（フォールバック）
+            }
         }
     }
 }

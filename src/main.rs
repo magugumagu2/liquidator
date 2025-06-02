@@ -346,6 +346,12 @@ async fn main() -> Result<()> {
         warn!("実験的リアルタイムRPCの初期化に失敗: {}。アーカイブRPCのみ使用", e);
     }
     
+    // 初回スキャン専用アーカイブRPCクライアントの初期化
+    info!("📚 初回スキャン専用アーカイブRPC設定の初期化中...");
+    if let Err(e) = strategy.init_initial_scan_client().await {
+        warn!("初回スキャン専用アーカイブRPCの初期化に失敗: {}。通常のarchive_clientを使用", e);
+    }
+    
     // 統合戦略の初期化（エラーで停止しない）
     info!("🔧 統合戦略の初期化を試行中...");
     match strategy.init_integrated_strategy().await {
