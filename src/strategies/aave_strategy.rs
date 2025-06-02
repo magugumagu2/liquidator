@@ -3479,17 +3479,32 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
         let mut provider = Provider::new(http);
         provider.set_interval(Duration::from_millis(200)); // 200ms間隔（負荷軽減）
         
-        // 接続テスト
-        match provider.get_block_number().await {
-            Ok(block_num) => {
-                info!("✅ 初回スキャン用アーカイブRPC接続成功: 最新ブロック {} (URL: {})", block_num, archive_rpc_url);
+        // 接続テスト（詳細ログ付き）
+        info!("🔍 初回スキャン用アーカイブRPCへの接続をテスト中...");
+        match tokio::time::timeout(Duration::from_secs(15), provider.get_block_number()).await {
+            Ok(Ok(block_num)) => {
+                info!("✅ 初回スキャン用アーカイブRPC接続成功!");
+                info!("   📊 RPC URL: {}", archive_rpc_url);
+                info!("   🧱 最新ブロック番号: {}", block_num);
+                info!("   ⚡ 専用RPCを使用した初回スキャンが有効になりました");
                 self.initial_scan_client = Some(Arc::new(provider));
                 Ok(())
             }
-            Err(e) => {
-                warn!("❌ 初回スキャン用アーカイブRPC接続失敗 ({}): {}。通常のarchive_clientを使用", archive_rpc_url, e);
+            Ok(Err(e)) => {
+                warn!("❌ 初回スキャン用アーカイブRPC接続エラー:");
+                warn!("   🌐 URL: {}", archive_rpc_url);
+                warn!("   📄 エラー詳細: {}", e);
+                warn!("   🔄 フォールバック: 通常のarchive_clientを使用します");
                 self.initial_scan_client = None;
-                Ok(()) // 失敗してもエラーにしない（フォールバック）
+                Ok(()) // エラーでも継続（フォールバック利用）
+            }
+            Err(_) => {
+                warn!("⏰ 初回スキャン用アーカイブRPC接続タイムアウト:");
+                warn!("   🌐 URL: {}", archive_rpc_url);
+                warn!("   ⏱️ タイムアウト時間: 15秒");
+                warn!("   🔄 フォールバック: 通常のarchive_clientを使用します");
+                self.initial_scan_client = None;
+                Ok(()) // タイムアウトでも継続（フォールバック利用）
             }
         }
     }
