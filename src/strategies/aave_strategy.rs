@@ -508,7 +508,7 @@ pub struct AaveStrategy<M> {
     /// Ethers client.
     archive_client: Arc<M>,
     write_client: Arc<M>,
-    /// 実験的リアルタイム用クライアント (http://5.104.84.211:3001/evm)
+    /// 実験的リアルタイム用クライアント (環境によって自動選択: localhost/外部IP)
     realtime_client: Option<Arc<Provider<ethers::providers::Http>>>,
     /// Amount of profits to bid in gas
     bid_percentage: u64,
@@ -3152,7 +3152,20 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
     pub async fn init_realtime_client(&mut self) -> Result<()> {
         info!("🚀 実験的リアルタイムRPCクライアントの初期化を開始（1秒ブロック対応）");
         
-        let realtime_rpc_url = "http://5.104.84.211:3001/evm";
+        // 環境に応じたリアルタイムRPCのURL決定
+        let realtime_rpc_url = std::env::var("REALTIME_RPC_URL").unwrap_or_else(|_| {
+            // write_clientから環境判定（main.rsと同じロジック）
+            let write_rpc_info = format!("{:?}", self.write_client);
+            if write_rpc_info.contains("localhost") || write_rpc_info.contains("127.0.0.1") {
+                // サーバー環境: ローカルRPC使用
+                "http://localhost:3001/evm".to_string()
+            } else {
+                // 開発環境: 外部RPC使用
+                "http://5.104.84.211:3001/evm".to_string()
+            }
+        });
+        
+        info!("🔗 リアルタイムRPC設定: {}", realtime_rpc_url);
         
         // カスタムHTTPクライアントを作成（1秒ブロック用高速化設定）
         let client = reqwest::Client::builder()
@@ -3164,7 +3177,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
             .tcp_nodelay(true)
             .build()?;
         
-        let url = reqwest::Url::parse(realtime_rpc_url)?;
+        let url = reqwest::Url::parse(&realtime_rpc_url)?;
         let http = ethers::providers::Http::new_with_client(url, client);
         let mut provider = Provider::new(http);
         provider.set_interval(Duration::from_millis(50)); // 100ms → 50msに短縮（1秒ブロック対応）
@@ -3172,12 +3185,12 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
         // 接続テスト
         match provider.get_block_number().await {
             Ok(block_num) => {
-                info!("✅ リアルタイムRPC接続成功: 最新ブロック {} (1秒ブロック対応)", block_num);
+                info!("✅ リアルタイムRPC接続成功: 最新ブロック {} (URL: {})", block_num, realtime_rpc_url);
                 self.realtime_client = Some(Arc::new(provider));
                 Ok(())
             }
             Err(e) => {
-                warn!("❌ リアルタイムRPC接続失敗: {}。アーカイブRPCにフォールバック", e);
+                warn!("❌ リアルタイムRPC接続失敗 ({}): {}。アーカイブRPCにフォールバック", realtime_rpc_url, e);
                 self.realtime_client = None;
                 Ok(()) // 失敗してもエラーにしない（フォールバック）
             }

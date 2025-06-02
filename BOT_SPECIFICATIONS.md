@@ -113,7 +113,8 @@ BUFFER_MULTIPLIER: 2x
 ```bash
 # RPC設定
 BACKUP_RPC_URL=https://rpc.hyperlend.finance/archive
-REALTIME_RPC_URL=http://5.104.84.211:3001/evm
+# REALTIME_RPC_URL=http://localhost:3001/evm  # サーバー環境
+# REALTIME_RPC_URL=http://5.104.84.211:3001/evm  # 開発環境（自動判定）
 
 # Redis設定（統合戦略用）
 REDIS_URL=redis://localhost:6379
