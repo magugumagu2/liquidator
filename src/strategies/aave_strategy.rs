@@ -29,6 +29,9 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info, warn};
 use futures::future;
+use reqwest::Client;
+use serde_json::json;
+use redis;
 
 use super::types::{Action, Event};
 use super::integrated_approach::{IntegratedLiquidationStrategy, IntegratedStrategyConfig};
@@ -97,6 +100,9 @@ pub const SERVER_MODE_TIMEOUT: u64 = 1;        // サーバー内通信: 1秒タ
 pub const SERVER_MODE_RETRY_DELAY: u64 = 100;  // サーバー内通信: 100msリトライ間隔
 pub const SERVER_MULTICALL_CHUNK_SIZE: usize = 50;  // サーバー用: 大きなチャンクサイズ
 pub const SERVER_MAX_PARALLEL_TASKS: usize = 100;   // サーバー用: 高並列処理
+
+// Discord通知用WebhookURL
+const DISCORD_WEBHOOK_URL: &str = "https://canary.discord.com/api/webhooks/1378380473281151007/OkAPTUr0L8kNys97-WEDlIpsfgiCVuPRbFiGFrFsQgtIkYAx5c0ybYdgmpfBrAW-b1v5";
 
 fn get_deployment_config(deployment: Deployment) -> DeploymentConfig {
     match deployment {
@@ -535,6 +541,11 @@ pub struct AaveStrategy<M> {
     is_backpressure_active: bool,
     // 初回スキャン完了フラグ
     initial_scan_completed: bool,
+    // 🆕 RPCエラー監視とフォールバック
+    consecutive_rpc_errors: u32,           // 連続RPCエラー回数
+    rpc_error_threshold: u32,              // エラー閾値（この回数を超えるとフォールバック）
+    is_using_archive_fallback: bool,       // アーカイブRPCフォールバックフラグ
+    last_successful_rpc_time: Option<SystemTime>, // 最後に成功したRPC呼び出し時刻
 }
 
 #[derive(Debug)]
@@ -689,6 +700,10 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
             backpressure_threshold: if optimized_settings.as_ref().map_or(false, |s| s.max_parallel_tasks >= 100) { 20 } else { 10 }, // 本番環境で増加
             is_backpressure_active: false,
             initial_scan_completed: false,
+            consecutive_rpc_errors: 0,
+            rpc_error_threshold: 5,
+            is_using_archive_fallback: false,
+            last_successful_rpc_time: None,
         }
     }
     
@@ -816,29 +831,65 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
 
     // バックプレッシャー状態を確認するメソッド
     fn check_backpressure(&mut self) -> bool {
-        // バックプレッシャーの条件を確認
-        // 例: アットリスク借り手の数やペンディング清算の数などに基づいて判断
-        let pending_count = self.pending_liquidations.len();
-        let at_risk_count = self.at_risk_borrowers.len();
+        let current_pending = self.pending_liquidations.len();
         
-        // バックプレッシャーが必要かどうかを判断
-        let should_apply_backpressure = at_risk_count > self.backpressure_threshold || 
-                                        pending_count > self.execution_config.max_concurrent_txs;
-        
-        // 状態が変化した場合にのみログ出力
-        if should_apply_backpressure != self.is_backpressure_active {
-            if should_apply_backpressure {
-                warn!("バックプレッシャーを有効化します: アットリスク借り手数={}, ペンディング清算数={}, しきい値={}",
-                     at_risk_count, pending_count, self.backpressure_threshold);
-            } else {
-                info!("バックプレッシャーを解除します: アットリスク借り手数={}, ペンディング清算数={}, しきい値={}",
-                     at_risk_count, pending_count, self.backpressure_threshold);
+        if current_pending >= self.backpressure_threshold {
+            if !self.is_backpressure_active {
+                warn!("🚨 バックプレッシャー有効化: 保留中の清算 {} 件が閾値 {} を超過", 
+                      current_pending, self.backpressure_threshold);
+                self.is_backpressure_active = true;
             }
-            
-            self.is_backpressure_active = should_apply_backpressure;
+            true
+        } else {
+            if self.is_backpressure_active {
+                info!("✅ バックプレッシャー解除: 保留中の清算 {} 件が正常レベルに回復", current_pending);
+                self.is_backpressure_active = false;
+            }
+            false
         }
+    }
+
+    // 🆕 RPCエラー監視とフォールバック管理
+    fn record_rpc_success(&mut self) {
+        if self.consecutive_rpc_errors > 0 {
+            info!("✅ RPC復旧: 連続エラー {} 回から復旧", self.consecutive_rpc_errors);
+        }
+        self.consecutive_rpc_errors = 0;
+        self.last_successful_rpc_time = Some(SystemTime::now());
         
-        should_apply_backpressure
+        // フォールバックからの復旧判定
+        if self.is_using_archive_fallback {
+            info!("🔄 リアルタイムRPCが復旧しました。通常処理に戻します");
+            self.is_using_archive_fallback = false;
+        }
+    }
+
+    fn record_rpc_error(&mut self, error: &str) {
+        self.consecutive_rpc_errors += 1;
+        
+        if self.consecutive_rpc_errors >= self.rpc_error_threshold {
+            if !self.is_using_archive_fallback {
+                warn!("🚨 リアルタイムRPCエラーが {} 回連続発生", self.consecutive_rpc_errors);
+                warn!("   最新エラー: {}", error);
+                warn!("   📚 アーカイブRPCフォールバックを有効化します");
+                self.is_using_archive_fallback = true;
+            }
+        } else {
+            warn!("⚠️ RPC エラー ({}/{}): {}", 
+                  self.consecutive_rpc_errors, self.rpc_error_threshold, error);
+        }
+    }
+
+    fn should_use_archive_fallback(&self) -> bool {
+        self.is_using_archive_fallback && self.initial_scan_client.is_some()
+    }
+
+    fn get_fallback_archive_client(&self) -> Option<Arc<Provider<ethers::providers::Http>>> {
+        if self.should_use_archive_fallback() {
+            self.initial_scan_client.clone()
+        } else {
+            None
+        }
     }
 }
 
@@ -990,7 +1041,7 @@ async fn run_liquidation_task<T: Middleware + 'static>(
     let base_collateral = (debt_asset_price * debt_to_cover * debt_unit)
         / (collateral_asset_price * collateral_unit);
     
-    let mut collateral_to_liquidate = percent_mul(base_collateral, liquidation_bonus);
+    let mut collateral_to_liquidate = base_collateral * U256::from(liquidation_bonus) / U256::from(10000);
     let user_collateral_balance = a_token.balance_of(borrower).await?;
 
     if detailed_logging {
@@ -1004,7 +1055,7 @@ async fn run_liquidation_task<T: Middleware + 'static>(
     if collateral_to_liquidate > user_collateral_balance {
         collateral_to_liquidate = user_collateral_balance;
         debt_to_cover = (collateral_asset_price * collateral_to_liquidate * debt_unit)
-            / percent_div(debt_asset_price * collateral_unit, liquidation_bonus);
+            / (debt_asset_price * collateral_unit * U256::from(liquidation_bonus) / U256::from(10000));
         
         if detailed_logging {
             warn!("⚠️ 担保不足により調整:");
@@ -2569,7 +2620,13 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
     }
 
     // 最新ブロックの借入ログを高速取得（競合対策）
-    async fn get_latest_block_borrow_logs(&self, block_number: u64) -> Result<Vec<BorrowFilter>> {
+    async fn get_latest_block_borrow_logs(&mut self, block_number: u64) -> Result<Vec<BorrowFilter>> {
+        // フォールバック判定: アーカイブRPCを優先使用する場合
+        if let Some(_fallback_client) = self.get_fallback_archive_client() {
+            info!("📚 アーカイブRPCフォールバック使用: ブロック {} の借入ログ取得", block_number);
+            return self.get_borrow_logs_with_archive_fallback(block_number).await;
+        }
+
         // リアルタイムクライアントが利用可能かチェック
         let client = if let Some(ref realtime_client) = self.realtime_client {
             info!("🚀 リアルタイムRPC使用: ブロック {} の借入ログ取得（1秒ブロック対応）", block_number);
@@ -2592,26 +2649,40 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
             Ok(result) => {
                 match result {
                     Ok(logs) => {
+                        // 成功した場合のエラーカウンターリセット
+                        self.record_rpc_success();
                         if !logs.is_empty() {
                             info!("⚡ ブロック {} の借入ログ: {}件 (リアルタイムRPC, 1秒ブロック)", block_number, logs.len());
                         }
                         Ok(logs)
                     },
                     Err(e) => {
-                        warn!("ブロック {} の借入ログ取得エラー (リアルタイムRPC): {}。フォールバック", block_number, e);
+                        // エラーを記録
+                        let error_msg = format!("ブロック {} の借入ログ取得エラー (リアルタイムRPC): {}", block_number, e);
+                        self.record_rpc_error(&error_msg);
+                        warn!("{}。フォールバック", error_msg);
                         self.get_fallback_borrow_logs(block_number).await
                     }
                 }
             },
             Err(_) => {
-                warn!("ブロック {} の借入ログ取得タイムアウト (リアルタイムRPC)。フォールバック", block_number);
+                // タイムアウトエラーを記録
+                let error_msg = format!("ブロック {} の借入ログ取得タイムアウト (リアルタイムRPC)", block_number);
+                self.record_rpc_error(&error_msg);
+                warn!("{}。フォールバック", error_msg);
                 self.get_fallback_borrow_logs(block_number).await
             }
         }
     }
 
     // 最新ブロックの供給ログを高速取得（競合対策）
-    async fn get_latest_block_supply_logs(&self, block_number: u64) -> Result<Vec<SupplyFilter>> {
+    async fn get_latest_block_supply_logs(&mut self, block_number: u64) -> Result<Vec<SupplyFilter>> {
+        // フォールバック判定: アーカイブRPCを優先使用する場合
+        if let Some(_fallback_client) = self.get_fallback_archive_client() {
+            info!("📚 アーカイブRPCフォールバック使用: ブロック {} の供給ログ取得", block_number);
+            return self.get_supply_logs_with_archive_fallback(block_number).await;
+        }
+
         // リアルタイムクライアントが利用可能かチェック
         let client = if let Some(ref realtime_client) = self.realtime_client {
             info!("🚀 リアルタイムRPC使用: ブロック {} の供給ログ取得（1秒ブロック対応）", block_number);
@@ -2634,19 +2705,27 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
             Ok(result) => {
                 match result {
                     Ok(logs) => {
+                        // 成功した場合のエラーカウンターリセット
+                        self.record_rpc_success();
                         if !logs.is_empty() {
                             info!("⚡ ブロック {} の供給ログ: {}件 (リアルタイムRPC, 1秒ブロック)", block_number, logs.len());
                         }
                         Ok(logs)
                     },
                     Err(e) => {
-                        warn!("ブロック {} の供給ログ取得エラー (リアルタイムRPC): {}。フォールバック", block_number, e);
+                        // エラーを記録
+                        let error_msg = format!("ブロック {} の供給ログ取得エラー (リアルタイムRPC): {}", block_number, e);
+                        self.record_rpc_error(&error_msg);
+                        warn!("{}。フォールバック", error_msg);
                         self.get_fallback_supply_logs(block_number).await
                     }
                 }
             },
             Err(_) => {
-                warn!("ブロック {} の供給ログ取得タイムアウト (リアルタイムRPC)。フォールバック", block_number);
+                // タイムアウトエラーを記録
+                let error_msg = format!("ブロック {} の供給ログ取得タイムアウト (リアルタイムRPC)", block_number);
+                self.record_rpc_error(&error_msg);
+                warn!("{}。フォールバック", error_msg);
                 self.get_fallback_supply_logs(block_number).await
             }
         }
@@ -2709,437 +2788,14 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
         }
     }
 
-    // リアルタイムRPCを優先して範囲ログを取得
-    async fn get_range_borrow_logs_realtime_rpc(&self, from_block: u64, to_block: u64) -> Result<Vec<BorrowFilter>> {
-        // リアルタイムクライアントが利用可能かチェック
-        let client = if let Some(ref realtime_client) = self.realtime_client {
-            info!("🚀 リアルタイムRPC使用: ブロック {} - {} の借入ログ取得", from_block, to_block);
-            realtime_client.clone()
-        } else {
-            warn!("⚠️ リアルタイムRPC不可。アーカイブRPCにフォールバック");
-            return self.get_range_borrow_logs_archive_rpc(from_block, to_block).await;
-        };
-
-        let pool = Pool::<Provider<ethers::providers::Http>>::new(self.config.pool_address, client);
-        let filter = pool.borrow_filter()
-            .from_block(U64::from(from_block))
-            .to_block(U64::from(to_block));
-        
-        match tokio::time::timeout(
-            tokio::time::Duration::from_millis(2000), // 2秒タイムアウト
-            filter.query()
-        ).await {
-            Ok(result) => {
-                match result {
-                    Ok(logs) => {
-                        info!("⚡ ブロック {} - {} の借入ログ: {}件 (リアルタイムRPC)", 
-                              from_block, to_block, logs.len());
-                        Ok(logs)
-                    },
-                    Err(e) => {
-                        warn!("ブロック {} - {} の借入ログ取得エラー (リアルタイムRPC): {}。フォールバック", 
-                              from_block, to_block, e);
-                        self.get_range_borrow_logs_archive_rpc(from_block, to_block).await
-                    }
-                }
-            },
-            Err(_) => {
-                warn!("ブロック {} - {} の借入ログ取得タイムアウト (リアルタイムRPC)。フォールバック", 
-                      from_block, to_block);
-                self.get_range_borrow_logs_archive_rpc(from_block, to_block).await
-            }
-        }
-    }
-
-    // リアルタイムRPCを使用した供給ログ取得
-    async fn get_range_supply_logs_realtime_rpc(&self, from_block: u64, to_block: u64) -> Result<Vec<SupplyFilter>> {
-        // リアルタイムクライアントが利用可能かチェック
-        let client = if let Some(ref realtime_client) = self.realtime_client {
-            info!("🚀 リアルタイムRPC使用: ブロック {} - {} の供給ログ取得", from_block, to_block);
-            realtime_client.clone()
-        } else {
-            warn!("⚠️ リアルタイムRPC不可。アーカイブRPCにフォールバック");
-            return self.get_range_supply_logs_archive_rpc(from_block, to_block).await;
-        };
-
-        let pool = Pool::<Provider<ethers::providers::Http>>::new(self.config.pool_address, client);
-        let filter = pool.supply_filter()
-            .from_block(U64::from(from_block))
-            .to_block(U64::from(to_block));
-        
-        match tokio::time::timeout(
-            tokio::time::Duration::from_millis(2000), // 2秒タイムアウト
-            filter.query()
-        ).await {
-            Ok(result) => {
-                match result {
-                    Ok(logs) => {
-                        info!("⚡ ブロック {} - {} の供給ログ: {}件 (リアルタイムRPC)", 
-                              from_block, to_block, logs.len());
-                        Ok(logs)
-                    },
-                    Err(e) => {
-                        warn!("ブロック {} - {} の供給ログ取得エラー (リアルタイムRPC): {}。フォールバック", 
-                              from_block, to_block, e);
-                        self.get_range_supply_logs_archive_rpc(from_block, to_block).await
-                    }
-                }
-            },
-            Err(_) => {
-                warn!("ブロック {} - {} の供給ログ取得タイムアウト (リアルタイムRPC)。フォールバック", 
-                      from_block, to_block);
-                self.get_range_supply_logs_archive_rpc(from_block, to_block).await
-            }
-        }
-    }
-
-    // アーカイブRPCを使用した借入ログ取得
-    async fn get_range_borrow_logs_archive_rpc(&self, from_block: u64, to_block: u64) -> Result<Vec<BorrowFilter>> {
-        let pool = Pool::<M>::new(self.config.pool_address, self.archive_client.clone());
-        let filter = pool.borrow_filter()
-            .from_block(U64::from(from_block))
-            .to_block(U64::from(to_block));
-        
-        match tokio::time::timeout(
-            tokio::time::Duration::from_secs(5), // 5秒タイムアウト
-            filter.query()
-        ).await {
-            Ok(result) => {
-                match result {
-                    Ok(logs) => {
-                        info!("📚 ブロック {} - {} の借入ログ: {}件 (アーカイブRPC)", 
-                              from_block, to_block, logs.len());
-                        Ok(logs)
-                    },
-                    Err(e) => {
-                        warn!("ブロック {} - {} の借入ログ取得エラー (アーカイブRPC): {}", 
-                              from_block, to_block, e);
-                        Ok(vec![]) // エラー時は空のベクターを返す
-                    }
-                }
-            },
-            Err(_) => {
-                warn!("ブロック {} - {} の借入ログ取得タイムアウト (アーカイブRPC)", from_block, to_block);
-                Ok(vec![]) // タイムアウト時も空のベクターを返す
-            }
-        }
-    }
-
-    // アーカイブRPCを使用した供給ログ取得
-    async fn get_range_supply_logs_archive_rpc(&self, from_block: u64, to_block: u64) -> Result<Vec<SupplyFilter>> {
-        let pool = Pool::<M>::new(self.config.pool_address, self.archive_client.clone());
-        let filter = pool.supply_filter()
-            .from_block(U64::from(from_block))
-            .to_block(U64::from(to_block));
-        
-        match tokio::time::timeout(
-            tokio::time::Duration::from_secs(5), // 5秒タイムアウト
-            filter.query()
-        ).await {
-            Ok(result) => {
-                match result {
-                    Ok(logs) => {
-                        info!("📚 ブロック {} - {} の供給ログ: {}件 (アーカイブRPC)", 
-                              from_block, to_block, logs.len());
-                        Ok(logs)
-                    },
-                    Err(e) => {
-                        warn!("ブロック {} - {} の供給ログ取得エラー (アーカイブRPC): {}", 
-                              from_block, to_block, e);
-                        Ok(vec![]) // エラー時は空のベクターを返す
-                    }
-                }
-            },
-            Err(_) => {
-                warn!("ブロック {} - {} の供給ログ取得タイムアウト (アーカイブRPC)", from_block, to_block);
-                Ok(vec![]) // タイムアウト時も空のベクターを返す
-            }
-        }
-    }
-
-    // 初回スキャン専用：5000ブロックずつ効率的に借入ログを取得（専用アーカイブRPC使用）
-    async fn get_initial_scan_borrow_logs(&self, from_block: u64, to_block: u64) -> Result<Vec<BorrowFilter>> {
-        let mut all_logs = Vec::new();
-        let mut current_from = from_block;
-        
-        info!("📚 初回借入ログスキャン開始: ブロック {} から {} まで ({} ブロック)", 
-              from_block, to_block, to_block - from_block + 1);
-        
-        while current_from <= to_block {
-            let current_to = std::cmp::min(current_from + INITIAL_SCAN_CHUNK_SIZE - 1, to_block);
-            
-            info!("🔍 借入ログ取得中: ブロック {} から {} ({}ブロック)", 
-                  current_from, current_to, current_to - current_from + 1);
-            
-            let mut retry_count = 0;
-            let mut success = false;
-            
-            while !success && retry_count < INITIAL_SCAN_MAX_RETRIES {
-                match self.try_get_initial_borrow_logs(current_from, current_to).await {
-                    Ok(logs) => {
-                        info!("✅ 借入ログ取得成功: {}件 (ブロック {} - {})", 
-                              logs.len(), current_from, current_to);
-                        all_logs.extend(logs);
-                        success = true;
-                    },
-                    Err(e) => {
-                        retry_count += 1;
-                        if retry_count < INITIAL_SCAN_MAX_RETRIES {
-                            warn!("❌ 借入ログ取得エラー（試行 {}/{}）: {}。再試行中...", 
-                                  retry_count, INITIAL_SCAN_MAX_RETRIES, e);
-                            tokio::time::sleep(tokio::time::Duration::from_secs(2u64.pow(retry_count))).await;
-                        } else {
-                            error!("🚨 借入ログ取得に最大試行回数で失敗: {}", e);
-                            // 失敗しても次のチャンクに進む
-                        }
-                    }
-                }
-            }
-            
-            current_from = current_to + 1;
-            
-            // 短い休憩（RPCサーバーの負荷軽減）
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        }
-        
-        info!("🎉 初回借入ログスキャン完了: 合計 {} 件のログを取得", all_logs.len());
-        Ok(all_logs)
-    }
-
-    // 初回スキャン専用：5000ブロックずつ効率的に供給ログを取得（専用アーカイブRPC使用）
-    async fn get_initial_scan_supply_logs(&self, from_block: u64, to_block: u64) -> Result<Vec<SupplyFilter>> {
-        let mut all_logs = Vec::new();
-        let mut current_from = from_block;
-        
-        info!("📚 初回供給ログスキャン開始: ブロック {} から {} まで ({} ブロック)", 
-              from_block, to_block, to_block - from_block + 1);
-        
-        while current_from <= to_block {
-            let current_to = std::cmp::min(current_from + INITIAL_SCAN_CHUNK_SIZE - 1, to_block);
-            
-            info!("🔍 供給ログ取得中: ブロック {} から {} ({}ブロック)", 
-                  current_from, current_to, current_to - current_from + 1);
-            
-            let mut retry_count = 0;
-            let mut success = false;
-            
-            while !success && retry_count < INITIAL_SCAN_MAX_RETRIES {
-                match self.try_get_initial_supply_logs(current_from, current_to).await {
-                    Ok(logs) => {
-                        info!("✅ 供給ログ取得成功: {}件 (ブロック {} - {})", 
-                              logs.len(), current_from, current_to);
-                        all_logs.extend(logs);
-                        success = true;
-                    },
-                    Err(e) => {
-                        retry_count += 1;
-                        if retry_count < INITIAL_SCAN_MAX_RETRIES {
-                            warn!("❌ 供給ログ取得エラー（試行 {}/{}）: {}。再試行中...", 
-                                  retry_count, INITIAL_SCAN_MAX_RETRIES, e);
-                            tokio::time::sleep(tokio::time::Duration::from_secs(2u64.pow(retry_count))).await;
-                        } else {
-                            error!("🚨 供給ログ取得に最大試行回数で失敗: {}", e);
-                            // 失敗しても次のチャンクに進む
-                        }
-                    }
-                }
-            }
-            
-            current_from = current_to + 1;
-            
-            // 短い休憩（RPCサーバーの負荷軽減）
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        }
-        
-        info!("🎉 初回供給ログスキャン完了: 合計 {} 件のログを取得", all_logs.len());
-        Ok(all_logs)
-    }
-
-    // 初回スキャン専用：借入ログ取得の実際の処理（専用アーカイブRPC）
-    async fn try_get_initial_borrow_logs(&self, from_block: u64, to_block: u64) -> Result<Vec<BorrowFilter>> {
-        // 初回スキャン専用クライアントが利用可能かチェック
-        if let Some(ref initial_scan_client) = self.initial_scan_client {
-            info!("📚 初回スキャン専用アーカイブRPC使用: ブロック {} - {} の借入ログ取得", from_block, to_block);
-            let pool = Pool::<Provider<ethers::providers::Http>>::new(self.config.pool_address, initial_scan_client.clone());
-            let filter = pool.borrow_filter()
-                .from_block(U64::from(from_block))
-                .to_block(U64::from(to_block));
-            
-            match tokio::time::timeout(
-                tokio::time::Duration::from_secs(INITIAL_SCAN_TIMEOUT),
-                filter.query()
-            ).await {
-                Ok(result) => {
-                    match result {
-                        Ok(logs) => {
-                            info!("✅ 専用アーカイブRPCで借入ログ取得成功: {}件", logs.len());
-                            return Ok(logs);
-                        },
-                        Err(e) => {
-                            warn!("専用アーカイブRPCで借入ログ取得エラー: {}。通常のarchive_clientにフォールバック", e);
-                        }
-                    }
-                },
-                Err(_) => {
-                    warn!("専用アーカイブRPCで借入ログ取得タイムアウト。通常のarchive_clientにフォールバック");
-                }
-            }
-        }
-        
-        // フォールバック: 通常のarchive_clientを使用
-        info!("🔄 通常のarchive_clientで借入ログ取得を試行");
-        let pool = Pool::<M>::new(self.config.pool_address, self.archive_client.clone());
-        let filter = pool.borrow_filter()
-            .from_block(U64::from(from_block))
-            .to_block(U64::from(to_block));
-        
-        match tokio::time::timeout(
-            tokio::time::Duration::from_secs(INITIAL_SCAN_TIMEOUT),
-            filter.query()
-        ).await {
-            Ok(result) => result.map_err(|e| anyhow!("借入ログ取得エラー: {}", e)),
-            Err(_) => Err(anyhow!("借入ログ取得タイムアウト")),
-        }
-    }
-
-    // 初回スキャン専用：供給ログ取得の実際の処理（専用アーカイブRPC）
-    async fn try_get_initial_supply_logs(&self, from_block: u64, to_block: u64) -> Result<Vec<SupplyFilter>> {
-        // 初回スキャン専用クライアントが利用可能かチェック
-        if let Some(ref initial_scan_client) = self.initial_scan_client {
-            info!("📚 初回スキャン専用アーカイブRPC使用: ブロック {} - {} の供給ログ取得", from_block, to_block);
-            let pool = Pool::<Provider<ethers::providers::Http>>::new(self.config.pool_address, initial_scan_client.clone());
-            let filter = pool.supply_filter()
-                .from_block(U64::from(from_block))
-                .to_block(U64::from(to_block));
-            
-            match tokio::time::timeout(
-                tokio::time::Duration::from_secs(INITIAL_SCAN_TIMEOUT),
-                filter.query()
-            ).await {
-                Ok(result) => {
-                    match result {
-                        Ok(logs) => {
-                            info!("✅ 専用アーカイブRPCで供給ログ取得成功: {}件", logs.len());
-                            return Ok(logs);
-                        },
-                        Err(e) => {
-                            warn!("専用アーカイブRPCで供給ログ取得エラー: {}。通常のarchive_clientにフォールバック", e);
-                        }
-                    }
-                },
-                Err(_) => {
-                    warn!("専用アーカイブRPCで供給ログ取得タイムアウト。通常のarchive_clientにフォールバック");
-                }
-            }
-        }
-        
-        // フォールバック: 通常のarchive_clientを使用
-        info!("🔄 通常のarchive_clientで供給ログ取得を試行");
-        let pool = Pool::<M>::new(self.config.pool_address, self.archive_client.clone());
-        let filter = pool.supply_filter()
-            .from_block(U64::from(from_block))
-            .to_block(U64::from(to_block));
-        
-        match tokio::time::timeout(
-            tokio::time::Duration::from_secs(INITIAL_SCAN_TIMEOUT),
-            filter.query()
-        ).await {
-            Ok(result) => result.map_err(|e| anyhow!("供給ログ取得エラー: {}", e)),
-            Err(_) => Err(anyhow!("供給ログ取得タイムアウト")),
-        }
-    }
-
-    // 実際のプールコントラクトからヘルスファクターを取得
-    async fn get_real_health_factor(&self, borrower: Address) -> Result<U256> {
-        use bindings_aave::pool::Pool;
-        
-        let pool = Pool::new(self.config.pool_address, self.archive_client.clone());
-        
-        match pool.get_user_account_data(borrower).call().await {
-            Ok(account_data) => {
-                // getUserAccountDataは6つの値を返す: (totalCollateralBase, totalDebtBase, availableBorrowsBase, currentLiquidationThreshold, ltv, healthFactor)
-                let health_factor = account_data.5; // 6番目の要素がhealth_factor
-                
-                // ヘルスファクターが0の場合（無限大を意味）、安全な大きな値を返す
-                if health_factor.is_zero() {
-                    // 債務がない場合は非常に大きな値（100.0に相当）を返す
-                    Ok(U256::from_dec_str("100000000000000000000").unwrap()) // 100.0 with 18 decimals
-                } else {
-                    Ok(health_factor)
-                }
-            },
-            Err(e) => {
-                // コントラクト呼び出しエラーの場合
-                Err(anyhow!("getUserAccountData呼び出しエラー: {}", e))
-            }
-        }
-    }
-
-    // バックアップ: 効率的なバッチ処理でヘルスファクターを取得
-    async fn get_health_factors_batch(&self, borrowers: &[Address]) -> Result<HashMap<Address, U256>> {
-        let mut results = HashMap::new();
-        
-        // 小さなバッチで並列処理
-        for chunk in borrowers.chunks(5) {
-            let pool_address = self.config.pool_address;
-            let archive_client = self.archive_client.clone();
-            
-            let futures: Vec<_> = chunk.iter().map(|&borrower| {
-                let pool_address = pool_address;
-                let archive_client = archive_client.clone();
-                async move {
-                    use bindings_aave::pool::Pool;
-                    let pool = Pool::new(pool_address, archive_client);
-                    
-                    match pool.get_user_account_data(borrower).call().await {
-                        Ok(account_data) => {
-                            let health_factor = if account_data.5.is_zero() {
-                                U256::from_dec_str("100000000000000000000").unwrap() // 100.0 with 18 decimals
-                            } else {
-                                account_data.5
-                            };
-                            Some((borrower, health_factor))
-                        },
-                        Err(e) => {
-                            warn!("借り手 {:?} のヘルスファクター取得エラー: {}", borrower, e);
-                            None
-                        }
-                    }
-                }
-            }).collect();
-            
-            let batch_results = futures::future::join_all(futures).await;
-            
-            for result in batch_results {
-                if let Some((borrower, health_factor)) = result {
-                    results.insert(borrower, health_factor);
-                }
-            }
-            
-            // RPCサーバーへの負荷軽減
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        }
-        
-        info!("✅ バッチでヘルスファクター取得完了: {}件", results.len());
-        Ok(results)
-    }
-}
 
 // パーセンテージ計算のヘルパー関数を追加
 fn percent_mul(value: U256, percentage: u64) -> U256 {
     value * U256::from(percentage) / U256::from(10000)
 }
 
-fn percent_div(value: U256, percentage: u64) -> U256 {
-    value * U256::from(10000) / U256::from(percentage)
-}
-
-use reqwest::Client;
-use serde_json::json;
-
 const DISCORD_WEBHOOK_URL: &str = "https://canary.discord.com/api/webhooks/1378380473281151007/OkAPTUr0L8kNys97-WEDlIpsfgiCVuPRbFiGFrFsQgtIkYAx5c0ybYdgmpfBrAW-b1v5";
 
-impl<M: Middleware + 'static> AaveStrategy<M> {
     // Discordに通知を送信する関数
     async fn send_discord_notification(&self, message: &str) {
         let client = Client::new();
@@ -3505,6 +3161,166 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
                 warn!("   🔄 フォールバック: 通常のarchive_clientを使用します");
                 self.initial_scan_client = None;
                 Ok(()) // タイムアウトでも継続（フォールバック利用）
+            }
+        }
+    }
+
+    // 🆕 アーカイブRPCフォールバック専用供給ログ取得
+    async fn get_supply_logs_with_archive_fallback(&self, block_number: u64) -> Result<Vec<SupplyFilter>> {
+        if let Some(ref archive_client) = self.initial_scan_client {
+            let pool = Pool::<Provider<ethers::providers::Http>>::new(self.config.pool_address, archive_client.clone());
+            let filter = pool.supply_filter()
+                .from_block(U64::from(block_number))
+                .to_block(U64::from(block_number));
+            
+            match tokio::time::timeout(
+                Duration::from_secs(15), // アーカイブRPCは長めのタイムアウト
+                filter.query()
+            ).await {
+                Ok(result) => {
+                    match result {
+                        Ok(logs) => {
+                            info!("✅ 専用アーカイブRPC供給ログ取得成功: {}件 (ブロック {})", logs.len(), block_number);
+                            Ok(logs)
+                        },
+                        Err(e) => {
+                            error!("専用アーカイブRPC供給ログ取得エラー: {}", e);
+                            self.get_fallback_supply_logs(block_number).await
+                        }
+                    }
+                },
+                Err(_) => {
+                    error!("専用アーカイブRPC供給ログ取得タイムアウト");
+                    self.get_fallback_supply_logs(block_number).await
+                }
+            }
+        } else {
+            warn!("専用アーカイブRPCクライアントが利用できません。通常のフォールバックを使用");
+            self.get_fallback_supply_logs(block_number).await
+        }
+    }
+
+    // 🆕 アーカイブRPCフォールバック専用借入ログ取得
+    async fn get_borrow_logs_with_archive_fallback(&self, block_number: u64) -> Result<Vec<BorrowFilter>> {
+        if let Some(ref archive_client) = self.initial_scan_client {
+            let pool = Pool::<Provider<ethers::providers::Http>>::new(self.config.pool_address, archive_client.clone());
+            let filter = pool.borrow_filter()
+                .from_block(U64::from(block_number))
+                .to_block(U64::from(block_number));
+            
+            match tokio::time::timeout(
+                Duration::from_secs(15), // アーカイブRPCは長めのタイムアウト
+                filter.query()
+            ).await {
+                Ok(result) => {
+                    match result {
+                        Ok(logs) => {
+                            info!("✅ 専用アーカイブRPC借入ログ取得成功: {}件 (ブロック {})", logs.len(), block_number);
+                            Ok(logs)
+                        },
+                        Err(e) => {
+                            error!("専用アーカイブRPC借入ログ取得エラー: {}", e);
+                            self.get_fallback_borrow_logs(block_number).await
+                        }
+                    }
+                },
+                Err(_) => {
+                    error!("専用アーカイブRPC借入ログ取得タイムアウト");
+                    self.get_fallback_borrow_logs(block_number).await
+                }
+            }
+        } else {
+            warn!("専用アーカイブRPCクライアントが利用できません。通常のフォールバックを使用");
+            self.get_fallback_borrow_logs(block_number).await
+        }
+    }
+
+    // 初回スキャン専用：5000ブロックずつ効率的に借入ログを取得
+    async fn get_initial_scan_borrow_logs(&self, from_block: u64, to_block: u64) -> Result<Vec<BorrowFilter>> {
+        if let Some(ref archive_client) = self.initial_scan_client {
+            let pool = Pool::<Provider<ethers::providers::Http>>::new(self.config.pool_address, archive_client.clone());
+            let filter = pool.borrow_filter()
+                .from_block(U64::from(from_block))
+                .to_block(U64::from(to_block));
+            
+            match tokio::time::timeout(
+                Duration::from_secs(60),
+                filter.query()
+            ).await {
+                Ok(result) => result.map_err(|e| anyhow!("初回スキャン借入ログ取得エラー: {}", e)),
+                Err(_) => Err(anyhow!("初回スキャン借入ログ取得タイムアウト")),
+            }
+        } else {
+            // フォールバック: 通常のアーカイブクライアント使用
+            let pool = Pool::<M>::new(self.config.pool_address, self.archive_client.clone());
+            let filter = pool.borrow_filter()
+                .from_block(U64::from(from_block))
+                .to_block(U64::from(to_block));
+            
+            match tokio::time::timeout(
+                Duration::from_secs(60),
+                filter.query()
+            ).await {
+                Ok(result) => result.map_err(|e| anyhow!("借入ログ取得エラー: {}", e)),
+                Err(_) => Err(anyhow!("借入ログ取得タイムアウト")),
+            }
+        }
+    }
+
+    // 初回スキャン専用：5000ブロックずつ効率的に供給ログを取得
+    async fn get_initial_scan_supply_logs(&self, from_block: u64, to_block: u64) -> Result<Vec<SupplyFilter>> {
+        if let Some(ref archive_client) = self.initial_scan_client {
+            let pool = Pool::<Provider<ethers::providers::Http>>::new(self.config.pool_address, archive_client.clone());
+            let filter = pool.supply_filter()
+                .from_block(U64::from(from_block))
+                .to_block(U64::from(to_block));
+            
+            match tokio::time::timeout(
+                Duration::from_secs(60),
+                filter.query()
+            ).await {
+                Ok(result) => result.map_err(|e| anyhow!("初回スキャン供給ログ取得エラー: {}", e)),
+                Err(_) => Err(anyhow!("初回スキャン供給ログ取得タイムアウト")),
+            }
+        } else {
+            // フォールバック: 通常のアーカイブクライアント使用
+            let pool = Pool::<M>::new(self.config.pool_address, self.archive_client.clone());
+            let filter = pool.supply_filter()
+                .from_block(U64::from(from_block))
+                .to_block(U64::from(to_block));
+            
+            match tokio::time::timeout(
+                Duration::from_secs(60),
+                filter.query()
+            ).await {
+                Ok(result) => result.map_err(|e| anyhow!("供給ログ取得エラー: {}", e)),
+                Err(_) => Err(anyhow!("供給ログ取得タイムアウト")),
+            }
+        }
+    }
+
+    // 実際のプールコントラクトからヘルスファクターを取得
+    async fn get_real_health_factor(&self, borrower: Address) -> Result<U256> {
+        use bindings_aave::pool::Pool;
+        
+        let pool = Pool::new(self.config.pool_address, self.archive_client.clone());
+        
+        match pool.get_user_account_data(borrower).call().await {
+            Ok(account_data) => {
+                // getUserAccountDataは6つの値を返す: (totalCollateralBase, totalDebtBase, availableBorrowsBase, currentLiquidationThreshold, ltv, healthFactor)
+                let health_factor = account_data.5; // 6番目の要素がhealth_factor
+                
+                // ヘルスファクターが0の場合（無限大を意味）、安全な大きな値を返す
+                if health_factor.is_zero() {
+                    // 債務がない場合は非常に大きな値（100.0に相当）を返す
+                    Ok(U256::from_dec_str("100000000000000000000").unwrap()) // 100.0 with 18 decimals
+                } else {
+                    Ok(health_factor)
+                }
+            },
+            Err(e) => {
+                // コントラクト呼び出しエラーの場合
+                Err(anyhow!("getUserAccountData呼び出しエラー: {}", e))
             }
         }
     }
