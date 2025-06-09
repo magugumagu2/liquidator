@@ -26,9 +26,8 @@ use std::fs::File;
 use std::io::Write;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 use tracing::{debug, error, info, warn};
-use futures::future;
 use reqwest::Client;
 use serde_json::json;
 use redis;
@@ -1560,14 +1559,25 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
         
         let start_time = std::time::SystemTime::now();
         
-        // 複数ブロックのログを並列取得
-        let (borrow_logs_result, supply_logs_result) = tokio::join!(
-            self.get_borrow_logs(U64::from(from_block), U64::from(to_block)),
-            self.get_supply_logs(U64::from(from_block), U64::from(to_block))
-        );
+        // 🆕 フォールバック機能付きログ取得を使用
+        let mut all_borrow_logs = Vec::new();
+        let mut all_supply_logs = Vec::new();
         
-        let borrow_logs = borrow_logs_result?;
-        let supply_logs = supply_logs_result?;
+        for current_block in from_block..=to_block {
+            // フォールバック機能付きメソッドを順次実行（可変借用の競合を回避）
+            let borrow_logs_result = self.get_latest_block_borrow_logs(current_block).await;
+            let supply_logs_result = self.get_latest_block_supply_logs(current_block).await;
+            
+            match borrow_logs_result {
+                Ok(logs) => all_borrow_logs.extend(logs),
+                Err(e) => warn!("ブロック {} の借入ログ取得失敗: {}. 継続します", current_block, e),
+            }
+            
+            match supply_logs_result {
+                Ok(logs) => all_supply_logs.extend(logs),
+                Err(e) => warn!("ブロック {} の供給ログ取得失敗: {}. 継続します", current_block, e),
+            }
+        }
         
         let fetch_duration = start_time.elapsed().unwrap();
         
@@ -1575,7 +1585,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
         let mut new_borrowers = 0;
         let mut updated_borrowers = 0;
         
-        for log in borrow_logs.iter() {
+        for log in all_borrow_logs.iter() {
             let user = log.on_behalf_of;
             if let Some(borrower) = self.borrowers.get_mut(&user) {
                 borrower.debt.insert(log.reserve);
@@ -1593,7 +1603,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
             }
         }
 
-        for log in supply_logs.iter() {
+        for log in all_supply_logs.iter() {
             let user = log.on_behalf_of;
             if let Some(borrower) = self.borrowers.get_mut(&user) {
                 borrower.collateral.insert(log.reserve);
@@ -1620,8 +1630,8 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
             fetch_duration.as_millis(),
             new_borrowers,
             updated_borrowers,
-            borrow_logs.len(),
-            supply_logs.len()
+            all_borrow_logs.len(),
+            all_supply_logs.len()
         );
         
         Ok(())
